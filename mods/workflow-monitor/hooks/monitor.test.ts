@@ -863,3 +863,26 @@ test('a workflow takes its name and phases from its launch, as the call\'s input
   expect((await pane.find({ key: 'fold-wf_unread' }))?.text).toContain('nightly-audit')
   await pane.unmount()
 })
+
+test('/workflows says what it does and takes: in the typeahead, with help, and on a mistyped option', async ($, on) => {
+  mock.clock(on, { now: 40_000_000 })
+  let spec: { name: string; description: string; argumentHint?: string } | undefined
+  let opened = 0
+  on('command.register', (_$, e) => { spec = e; return { value: { command: e.name } } })
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('ui.open', () => { opened++; return { value: { isPlaced: true } } })
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  expect(spec?.name).toBe('workflows')
+  expect(spec?.description).toMatch(/workflows and subagents/)
+  expect(spec?.argumentHint).toBe('[demo|clear|help]')
+  // Help names every option in a markdown table, the row's way of drawing it; none opens the pane.
+  const help = await $.command.run({ command: 'workflows', args: 'help' })
+  expect(help.text).toMatch(/^a live pane of your workflows and subagents\.\n\n\| Command \| What it does \|\n\|---\|---\|\n/)
+  for (const option of ['/workflows', '/workflows demo', '/workflows clear', '/workflows help']) expect(help.text).toContain('| `' + option + '` |')
+  const typo = await $.command.run({ command: 'workflows', args: 'clera' })
+  expect(typo.text).toMatch(/^unknown option `clera`\. It takes these:\n\n\| Command/)
+  expect(typo.text).toContain('| `/workflows clear` |')
+  expect(opened).toBe(0)
+  expect((await $.command.run({ command: 'workflows', args: '' })).text).toBe('Workflow monitor opened.')
+  expect(opened).toBe(1)
+})

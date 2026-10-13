@@ -21,7 +21,7 @@ Then install what you want:
 | Name | Type | What it does |
 |---|---|---|
 | [workflow-budget](skills/workflow-budget) | Skill | Caps multi-agent workflow size (40 agents by default), asks before going bigger, and uses cheaper verification patterns. |
-| [workflow-monitor](mods/workflow-monitor) | Mod | Live pane of running workflows and subagents: model, effort, tokens, time and estimated cost. Opens by itself when a subagent starts, or with `/workflows`. |
+| [workflow-monitor](mods/workflow-monitor) | Mod | Live pane of running workflows and subagents: model, effort, tokens, time and estimated cost. Opens by itself when a subagent starts, or with `/workflows` (`/workflows help` lists its options). |
 
 ## Layout
 

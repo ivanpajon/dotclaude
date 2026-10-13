@@ -6,6 +6,29 @@ import type { AgentRow, AgentStatus, AgentUsage, Control, ControlItem, Idle, Log
 const PANE = 'workflow-monitor'
 const INSPECT = 'workflow-monitor-agent'
 const TITLE = 'Workflows'
+// What /workflows help prints after an opening line: markdown, as a command's output row draws it
+// on every surface (spaces don't line up columns there, a table does).
+const USAGE = [
+  '| Command | What it does |',
+  '|---|---|',
+  '| `/workflows` | Open the pane. It also opens by itself when a subagent starts. |',
+  '| `/workflows demo` | Load a sample workflow to try the pane out. |',
+  '| `/workflows clear` | Remove finished, archived and demo agents. Running ones stay. |',
+  '| `/workflows help` | Show this help. |',
+  '',
+  '**In the pane**',
+  '- **⚙** opens the settings panel. On a running agent: pause or resume it, stop it, and pick the model and effort'
+    + ' of its next requests. On a card\'s header: the same for every agent in the workflow, the ones it starts later'
+    + ' too (an agent\'s own setting wins); once the workflow is over, Archive or Remove it. It shows **◆** while a'
+    + ' model or effort is set.',
+  '- **↗** opens the Inspect view in another tab: a finished agent\'s latest activity, its thinking, text and tool'
+    + ' calls. For a running agent, Inspect is in its settings panel and follows along live.',
+  '- **✕** removes a finished workflow from the board. It isn\'t deleted: it moves under **Archived** at the bottom,'
+    + ' where Restore brings it back and Remove deletes it from the monitor for good. If the run starts again, it'
+    + ' comes back by itself.',
+  '',
+  '**Status**: ● working · ⏸ paused · ⏹ stopped · ✓ done · ✗ failed · ○ between phases · ⚠ script failed',
+].join('\n')
 const MAX_ROWS = 500
 const SUBAGENTS = 'subagents'
 const MAX_LOG = 200
@@ -631,9 +654,11 @@ export const register: Register = on => {
   })
 
   on('session.start', async ($, e, next) => {
+    // The typeahead's line for it, and its options drawn dim after the name (USAGE spells them out).
     await $.command.register({
       name: 'workflows',
-      description: 'Show running workflows and subagents in a pane (/workflows demo: sample data; /workflows clear: tidy up)',
+      description: 'Live pane of workflows and subagents: model, effort, tokens, time, cost; pause, stop, inspect',
+      argumentHint: '[demo|clear|help]',
     })
     // A reload starts this module afresh: pick up the pauses and stops already asked for.
     for (const [id, v] of Object.entries(await read($, controls))) (v === 'pause' ? pauseRequested : stopRequested).add(id)
@@ -678,6 +703,10 @@ export const register: Register = on => {
       await $.ui.open({ id: PANE, title: TITLE })
       return { text: 'Demo workflow loaded: its running agents tick every second. Try ⚙ on a running row. /workflows clear removes it.' }
     }
+    // Each opening line follows the plugin's name the row starts with ("workflow-monitor: …").
+    if (arg === 'help') return { text: `a live pane of your workflows and subagents.\n\n${USAGE}` }
+    // An option it doesn't know: say so with the ones it does, rather than open the pane unasked.
+    if (arg) return { text: `unknown option \`${arg.replace(/`/g, '')}\`. It takes these:\n\n${USAGE}` }
     await $.ui.open({ id: PANE, title: TITLE })
 
     return { text: 'Workflow monitor opened.' }
