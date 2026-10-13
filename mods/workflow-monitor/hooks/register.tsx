@@ -91,8 +91,16 @@ function look(r: AgentRow, c: Control | undefined): [string, string] {
   return GLYPH[r.status]
 }
 
-// Column widths, shared by the header row and every agent row so they line up.
-const W = { glyph: 2, model: 11, effort: 8, tokens: 8, time: 8, cost: 8, gear: 3 }
+// Column widths, shared by the header row and every agent row so they line up, each the widest its
+// values run to: "Sonnet 5.5", "Extra high", "999.9k", "59m 59s", "$12.34". The row button's label
+// is three cells; a surface that draws native buttons adds its own chrome round it, which a
+// three-cell column cuts down to "…", so it gets `nativeGear`.
+const W = { glyph: 2, model: 10, effort: 10, tokens: 7, time: 7, cost: 7, gear: 3, nativeGear: 6 }
+// A card's border and padding, both sides together.
+const CARD_X = 4
+// The fewest columns an agent's name gets in a row of columns ("investigate…"); less, and each
+// agent goes on two lines instead.
+const LABEL_MIN = 12
 
 function costOf(model: string, u: AgentUsage): number | undefined {
   const hit = PRICES.find(([key]) => model.includes(key))
@@ -127,6 +135,8 @@ function duration(ms: number): string {
 }
 
 const effortLabel = (e?: string) => EFFORT_OPTIONS.find(o => o.value === e)?.label ?? e ?? '—'
+// The costliest efforts stand out in red.
+const effortColor =(e?: string) => (e === 'xhigh' || e === 'max' ? 'error' : undefined)
 
 type ApiUsage = { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }
 
@@ -301,12 +311,12 @@ function tallyOf(rows: AgentRow[], ctl: Record<string, Control>, holding: Record
 
 // What a card's status chip says of its group, the first that holds: some agent works; else some
 // is paused; else some is stopping; else none runs and the run's own end decides (a workflow), or
-// it may be between phases (idle) until it has been quiet a while; else the agents' own outcome,
-// marked a guess on a workflow whose end never came.
+// it may be between phases (idle) until it has been quiet a while; else the agents' own outcome
+// (a workflow whose end never came reads from its agents too).
 type GroupState =
   | { kind: 'working' | 'paused' | 'stopping' }
   | { kind: 'idle'; since: number }
-  | { kind: 'done' | 'stopped' | 'script-failed' | 'failed'; guess?: boolean }
+  | { kind: 'done' | 'stopped' | 'script-failed' | 'failed' }
 function groupState(rows: AgentRow[], t: Tally, isWorkflow: boolean, outcome: RunOutcome | undefined, isQuiet: boolean): GroupState {
   if (t.working) return { kind: 'working' }
   if (t.paused) return { kind: 'paused' }
@@ -315,8 +325,7 @@ function groupState(rows: AgentRow[], t: Tally, isWorkflow: boolean, outcome: Ru
   if (outcome === 'failed') return { kind: 'script-failed' }
   if (outcome === 'completed') return { kind: 'done' }
   if (isWorkflow && !isQuiet) return { kind: 'idle', since: lastEnd(rows) }
-  const guess = isWorkflow || undefined
-  return t.done ? { kind: 'done', guess } : t.failed ? { kind: 'failed', guess } : { kind: 'stopped', guess }
+  return { kind: t.done ? 'done' : t.failed ? 'failed' : 'stopped' }
 }
 const isActive = (s: GroupState) => s.kind === 'working' || s.kind === 'paused' || s.kind === 'stopping' || s.kind === 'idle'
 
@@ -872,9 +881,15 @@ export const register: Register = on => {
     const lapsed = await read($, quiet)
     const tick = Math.max(await $.clock.now(), ...list.map(a => a.endedAt ?? a.startedAt), 0)
     const width = e.props.bodyColumns ?? e.viewport?.columns ?? 100
-    // Wide: every column. Medium: no effort/cost columns. Narrow: each agent on two lines.
+    // A card's chip: spelled out on wide ("⏸ 1 · ✓ 1"), tight on medium ("⏸1 ✓1"), and on narrow a
+    // lead alone keeps no word either ("⏸1", not "⏸ 1 paused").
     const layout = width >= 84 ? 'wide' : width >= 58 ? 'medium' : 'narrow'
     const wide = layout === 'wide'
+    // Agent rows hide no column at any width: the agent's name is cut short instead, and once that
+    // leaves it under LABEL_MIN, each agent goes on two lines, every column's value on the second.
+    const gearW = e.surface === 'terminal' ? W.gear : W.nativeGear
+    const beside = CARD_X + [W.glyph, W.model, W.effort, W.tokens, W.time, W.cost, gearW].reduce((sum, w) => sum + w + 1, 0)
+    const inline = width - beside < LABEL_MIN
 
     if (list.length === 0) {
       return (
@@ -931,17 +946,21 @@ export const register: Register = on => {
     const glyphCell = (child: unknown) => (
       <Box width={W.glyph} flexShrink={0} justifyContent="center" alignItems="center">{child}</Box>
     )
+    // The row button, centred both ways in its column (⚙ ◆ ▴ ↗ line up; a native button sits mid-row).
+    const gearCell = (child: unknown) => (
+      <Box width={gearW} flexShrink={0} justifyContent="center" alignItems="center">{child}</Box>
+    )
 
     const columns = (key: string) => (
       <Box key={key} flexDirection="row" gap={1}>
         {cell(W.glyph, <Text> </Text>)}
         <Box flexGrow={1} flexShrink={1} minWidth={0}><Text dimColor>Agent</Text></Box>
         {cell(W.model, <Text dimColor>Model</Text>)}
-        {wide && cell(W.effort, <Text dimColor>Effort</Text>)}
+        {cell(W.effort, <Text dimColor>Effort</Text>)}
         {cell(W.tokens, <Text dimColor>Tokens</Text>, true)}
         {cell(W.time, <Text dimColor>Time</Text>, true)}
-        {wide && cell(W.cost, <Text dimColor>Cost</Text>, true)}
-        {cell(W.gear, <Text> </Text>)}
+        {cell(W.cost, <Text dimColor>Cost</Text>, true)}
+        {gearCell(<Text> </Text>)}
       </Box>
     )
 
@@ -981,8 +1000,11 @@ export const register: Register = on => {
       const isOpen = open === `agent:${r.id}`
       const hasOverride = !!(own[r.id]?.model || own[r.id]?.effort)
       const accent = r.isOverridden ? 'merged' : undefined
-      // Running: the settings gear. Finished: straight to its activity (perform() tells them apart).
-      const gear = control(button(`gear-${r.id}`, r.status !== 'running' ? '›' : isOpen ? '▴' : hasOverride ? '◆' : '⚙', { plain: true }))
+      // Running: the settings gear. Finished: Inspect's own ↗, its one action left, straight to its
+      // activity (perform() tells them apart). Padded with no-break spaces, which no surface trims: a
+      // wider target than the glyph alone, in a column wide enough for it (see gearCell).
+      const icon = r.status !== 'running' ? '↗' : isOpen ? '▴' : hasOverride ? '◆' : '⚙'
+      const gear = control(button(`gear-${r.id}`, ` ${icon} `, { plain: true }))
       // The icon says paused or stopped; after the label, only that it's still on its way there.
       const state = paused ? (holding[r.id] ? '' : ' · pausing…') : stopping ? ' · stopping…' : ''
       const label = <Text wrap="truncate-end" dimColor={r.status !== 'running'}>{r.label}<Text color={color}>{state}</Text></Text>
@@ -997,11 +1019,11 @@ export const register: Register = on => {
             button(`pause-${r.id}`, paused ? '▶ Resume' : '⏸ Pause'),
             button(`stop-${r.id}`, stopping ? '⏹ Stopping…' : '⏹ Stop'),
           ] : []),
-          button(`activity-${r.id}`, '◉ Inspect'),
+          button(`activity-${r.id}`, '↗ Inspect'),
         ],
       )
 
-      if (layout === 'narrow') {
+      if (inline) {
         return [
           <Box key={r.id} flexDirection="column">
             <Box flexDirection="row" gap={1}>
@@ -1009,11 +1031,11 @@ export const register: Register = on => {
               <Box flexGrow={1} flexShrink={1} minWidth={0}>
                 {label}
               </Box>
-              {cell(W.gear, gear)}
+              {gearCell(gear)}
             </Box>
             <Box flexDirection="row" flexWrap="wrap" columnGap={2} marginLeft={W.glyph + 1}>
               <Text color={accent}>{shortModel(r.model)}</Text>
-              <Text color={accent} dimColor={!accent}>{effortLabel(r.effort)}</Text>
+              <Text color={accent ?? effortColor(r.effort)} dimColor={!accent && !effortColor(r.effort)}>{effortLabel(r.effort)}</Text>
               <Text>{tokens(totalTokens(r.usage))}<Text dimColor> tok</Text></Text>
               {time}
               <Text dimColor>{money(costOf(r.model, r.usage))}</Text>
@@ -1030,11 +1052,11 @@ export const register: Register = on => {
             {label}
           </Box>
           {cell(W.model, <Text wrap="truncate-end" color={r.isOverridden ? 'merged' : undefined}>{shortModel(r.model)}</Text>)}
-          {wide && cell(W.effort, <Text color={r.isOverridden ? 'merged' : r.effort === 'max' || r.effort === 'xhigh' ? 'warning' : undefined}>{effortLabel(r.effort)}</Text>)}
+          {cell(W.effort, <Text color={r.isOverridden ? 'merged' : effortColor(r.effort)}>{effortLabel(r.effort)}</Text>)}
           {cell(W.tokens, <Text>{tokens(totalTokens(r.usage))}</Text>, true)}
           {cell(W.time, time, true)}
-          {wide && cell(W.cost, <Text dimColor>{money(costOf(r.model, r.usage))}</Text>, true)}
-          {cell(W.gear, gear)}
+          {cell(W.cost, <Text dimColor>{money(costOf(r.model, r.usage))}</Text>, true)}
+          {gearCell(gear)}
         </Box>,
         settings,
       ].filter(Boolean)
@@ -1067,29 +1089,43 @@ export const register: Register = on => {
     }
 
     // A card's status chip (see groupState): a lead for where the group stands, then a mark for each
-    // other kind of agent in it: ⏸ paused, ✗ failed, ⏹ stopped (not on narrow), and on wide a dim
-    // ✓ done while the group goes on. A count spells "⏸ 3" on wide, "⏸3" narrower; "…" marks agents
-    // on their way to paused or stopped; "?" an outcome guessed for a run whose end never came.
+    // other kind of agent in it, at any width: ⏸ paused, ✗ failed, ⏹ stopped, and a dim ✓ done
+    // while the group goes on or once it was stopped. Alone, the lead says it in a word
+    // ("⏸ 2 paused", "✓ done"); beside marks it is an icon and a count like them ("⏸ 4 · ✗ 1"), a
+    // zero too ("✓ 0 · ✗ 3": the run completed, none of its agents did). A count spells "⏸ 3" on
+    // wide, "⏸3" narrower; "…" marks agents on their way to paused or stopped.
     const chip = (key: string, s: GroupState, t: Tally) => {
       const roomy = layout !== 'narrow'
-      const count = (glyph: string, n: number, tail = '') => (wide ? `${glyph} ${n}${tail}` : `${glyph}${n}${tail}`)
-      const guess = 'guess' in s && s.guess ? <Text color="inactive">?</Text> : null
-      const lead =
-        s.kind === 'working' ? <Text color={RUNNING}>{roomy ? `● ${t.working} working` : `●${t.working}`}</Text>
-        : s.kind === 'paused' ? <Text color="warning">{roomy ? `⏸ ${t.paused} ${t.pausing ? 'pausing…' : 'paused'}` : `⏸${t.paused}${t.pausing ? '…' : ''}`}</Text>
-        : s.kind === 'stopping' ? <Text color={STOPPED}>{roomy ? `⏹ ${t.stopping} stopping…` : `⏹${t.stopping}…`}</Text>
-        : s.kind === 'idle' ? <Text color={RUNNING} dimColor>{roomy ? '○ idle' : '○'}</Text>
-        : s.kind === 'done' ? <Text color="success">{roomy ? '✓ done' : '✓'}{guess}</Text>
-        : s.kind === 'stopped' ? <Text color={STOPPED}>{roomy ? '⏹ stopped' : '⏹'}{guess}</Text>
-        : s.kind === 'script-failed' ? <Text color="error">{roomy ? '✗ script failed' : '✗'}</Text>
-        : <Text color="error">{roomy ? `✗ ${t.failed} failed` : `✗${t.failed}`}{guess}</Text>
+      // No count: a lead that is the run's own state alone (○ between phases, ⚠ its script threw).
+      const count = (glyph: string, n: number | undefined, tail = '') =>
+        (n === undefined ? `${glyph}${tail}` : wide ? `${glyph} ${n}${tail}` : `${glyph}${n}${tail}`)
+      // Each lead: its icon, color, agents (none for a state of the run alone), word, and whether its
+      // word carries the count too (`said` where the word counts fewer: stopping folds in the ⏹
+      // mark, the agents already stopped too).
+      type Lead = { glyph: string; color: string; n?: number; said?: number; tail?: string; word: string; counted?: boolean }
+      const { glyph, color, n, said = n, tail = '', word, counted = false }: Lead =
+        s.kind === 'working' ? { glyph: '●', color: RUNNING, n: t.working, word: 'working', counted: true }
+        : s.kind === 'paused' ? { glyph: '⏸', color: 'warning', n: t.paused, tail: t.pausing ? '…' : '', word: t.pausing ? 'pausing…' : 'paused', counted: true }
+        : s.kind === 'stopping' ? { glyph: '⏹', color: STOPPED, n: t.stopping + t.stopped, said: t.stopping, tail: '…', word: 'stopping…', counted: true }
+        : s.kind === 'idle' ? { glyph: '○', color: RUNNING, word: 'idle' }
+        : s.kind === 'done' ? { glyph: '✓', color: 'success', n: t.done, word: 'done' }
+        : s.kind === 'stopped' ? { glyph: '⏹', color: STOPPED, n: t.stopped, word: 'stopped' }
+        // The run's own script threw: apart from ✗, which counts agents that failed.
+        : s.kind === 'script-failed' ? { glyph: '⚠', color: 'error', word: 'script failed' }
+        : { glyph: '✗', color: 'error', n: t.failed, word: 'failed', counted: true }
       const marks = [
         s.kind !== 'paused' && t.paused > 0 && <Text key="paused" color="warning">{count('⏸', t.paused, t.pausing ? '…' : '')}</Text>,
         s.kind !== 'failed' && t.failed > 0 && <Text key="failed" color="error">{count('✗', t.failed)}</Text>,
-        roomy && s.kind !== 'stopped' && s.kind !== 'stopping' && t.stopped + t.stopping > 0
+        s.kind !== 'stopped' && s.kind !== 'stopping' && t.stopped + t.stopping > 0
           && <Text key="stopped" color={STOPPED}>{count('⏹', t.stopped + t.stopping, t.stopping ? '…' : '')}</Text>,
-        wide && isActive(s) && t.done > 0 && <Text key="done" color="success" dimColor>{count('✓', t.done)}</Text>,
+        // Not beside ⚠, whose word would go for a mark that matters less than it.
+        (isActive(s) || s.kind === 'stopped') && t.done > 0 && <Text key="done" color="success" dimColor>{count('✓', t.done)}</Text>,
       ].filter(Boolean)
+      const lead = (
+        <Text color={color} dimColor={s.kind === 'idle'}>
+          {roomy && !marks.length ? `${glyph} ${counted ? `${said} ` : ''}${word}` : count(glyph, marks.length || counted ? n : undefined, tail)}
+        </Text>
+      )
       // Between phases, how long since its last agent ended, counting on the surface.
       const quietFor = s.kind === 'idle' && (Client
         ? <Client key={`idle-${key}`} module="./ticker.tsx" props={{ base: tick - s.since, rate: 1, dim: true }} />
@@ -1184,7 +1220,7 @@ export const register: Register = on => {
                   <Text dimColor>{done}/{prs.length}</Text>
                 </Box>
                 {progress(`${key}-${p}`, prs)}
-                {layout !== 'narrow' && columns(`cols-${key}-${p}`)}
+                {!inline && columns(`cols-${key}-${p}`)}
                 {prs.flatMap(agentRow)}
               </Box>
             )

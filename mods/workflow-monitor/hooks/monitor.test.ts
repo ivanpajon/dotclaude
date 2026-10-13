@@ -158,6 +158,21 @@ test('/workflows demo loads sample agents that honour Stop', async ($, on) => {
   expect(JSON.stringify(await pane.drawn())).not.toContain('"alt":"stopped"')
   expect(await pane.find({ text: /⏸/ })).toBeTruthy()
   expect(await pane.find({ text: /· paused/ })).toBeFalsy()
+  // The costliest effort stands out in red; a finished row opens its activity from a padded ↗.
+  expect((await pane.findAll({ text: 'Extra high' })).some(x => x.type === 'Text' && x.props.color === 'error')).toBe(true)
+  expect((await pane.find({ key: 'gear-demo-3' }))?.props.label).toBe(' ↗ ')
+  // It sits centred in a column wide enough for the desktop's native button round it.
+  type Node = { key?: string; props?: Record<string, unknown>; children?: unknown[] }
+  const holder = (n: unknown, key: string): Node | undefined => {
+    const kids = ((n as Node)?.children ?? []) as Node[]
+    return kids.some(c => c?.key === key || c?.props?.key === key) ? n as Node : kids.map(c => holder(c, key)).find(Boolean)
+  }
+  expect(holder(await pane.drawn(), 'gear-demo-3')?.props).toMatchObject({ width: 6, justifyContent: 'center', alignItems: 'center' })
+  // Narrow, on its own line under the label, the costliest effort is red too, not dim.
+  const narrow = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'terminal', component: 'Pane', requestId: 'workflow-monitor', props: { ...props, bodyColumns: 50 }, viewport: { columns: 50, rows: 60 } })
+  expect((await narrow.findAll({ text: 'Extra high' })).some(x => x.type === 'Text' && x.props.color === 'error' && !x.props.dimColor)).toBe(true)
+  expect(holder(await narrow.drawn(), 'gear-demo-3')?.props).toMatchObject({ width: 3 })
+  await narrow.unmount()
   await pane.press({ key: 'gear-demo-4' })
   await pane.press({ key: 'stop-demo-4' })
   await pane.unmount()
@@ -605,12 +620,8 @@ test('a card\'s status chip says where its group stands, at any width', async ($
     while (!(await it.next()).done) { /* read on */ }
   }
 
-  // agent-c1..c5: two still working, one done, one failed, one stopped.
   await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_c', input: { script: SCRIPT } })
   for (let i = 1; i <= 5; i++) await spawn('toolu_c', 'wf_c', i)
-  await end('agent-c2', 'answer')
-  await end('agent-c3', 'error')
-  await end('agent-c4', 'aborted')
 
   const mount = (columns: number, surface: 'terminal' | 'desktop' = 'desktop') => $.ui.mount({
     plugin: 'workflow-monitor', surface, component: 'Pane', requestId: 'workflow-monitor',
@@ -636,62 +647,71 @@ test('a card\'s status chip says where its group stands, at any width', async ($
     return out
   }
 
-  // Working: the lead counts the working, then a mark for each other kind; the border is blue.
-  expect(await chipOf(pane, 'wf_c')).toBe('● 2 working · ✗ 1 · ⏹ 1 · ✓ 1')
-  expect(await atWidths('wf_c')).toEqual(['● 2 working ✗1 ⏹1', '●2 ✗1'])
+  // All working: the lead alone says it in a word, but where there's no room.
+  expect(await chipOf(pane, 'wf_c')).toBe('● 5 working')
+  expect(await atWidths('wf_c')).toEqual(['● 5 working', '●5'])
+
+  // agent-c1..c5: two still working, one done, one failed, one stopped.
+  await end('agent-c2', 'answer')
+  await end('agent-c3', 'error')
+  await end('agent-c4', 'aborted')
+
+  // Working: the lead counts the working, then a mark for each other kind, at any width; the border is blue.
+  expect(await chipOf(pane, 'wf_c')).toBe('● 2 · ✗ 1 · ⏹ 1 · ✓ 1')
+  expect(await atWidths('wf_c')).toEqual(['●2 ✗1 ⏹1 ✓1', '●2 ✗1 ⏹1 ✓1'])
   expect((await card('wf_c'))?.borderColor).toBe('#4D9DF0')
 
   // Pausing them all: amber, and "…" until each is held at its next request.
   await pane.press({ key: 'gear-group-wf_c' })
   await pane.press({ key: 'pause-all-wf_c' })
-  expect(await chipOf(pane, 'wf_c')).toBe('⏸ 2 pausing… · ✗ 1 · ⏹ 1 · ✓ 1')
-  expect(await atWidths('wf_c')).toEqual(['⏸ 2 pausing… ✗1 ⏹1', '⏸2… ✗1'])
+  expect(await chipOf(pane, 'wf_c')).toBe('⏸ 2… · ✗ 1 · ⏹ 1 · ✓ 1')
+  expect(await atWidths('wf_c')).toEqual(['⏸2… ✗1 ⏹1 ✓1', '⏸2… ✗1 ⏹1 ✓1'])
   expect((await card('wf_c'))?.borderColor).toBe('warning')
   const held1 = request('agent-c1')
   const held5 = request('agent-c5')
   await clock.settle()
-  expect(await chipOf(pane, 'wf_c')).toBe('⏸ 2 paused · ✗ 1 · ⏹ 1 · ✓ 1')
-  expect(await atWidths('wf_c')).toEqual(['⏸ 2 paused ✗1 ⏹1', '⏸2 ✗1'])
+  expect(await chipOf(pane, 'wf_c')).toBe('⏸ 2 · ✗ 1 · ⏹ 1 · ✓ 1')
+  expect(await atWidths('wf_c')).toEqual(['⏸2 ✗1 ⏹1 ✓1', '⏸2 ✗1 ⏹1 ✓1'])
 
   // One resumed works again, the other still waits.
   await pane.press({ key: 'gear-agent-c1' })
   await pane.press({ key: 'pause-agent-c1' })
   await held1
-  expect(await chipOf(pane, 'wf_c')).toBe('● 1 working · ⏸ 1 · ✗ 1 · ⏹ 1 · ✓ 1')
+  expect(await chipOf(pane, 'wf_c')).toBe('● 1 · ⏸ 1 · ✗ 1 · ⏹ 1 · ✓ 1')
 
-  // Stopping them: grey, the stopped mark folded into the lead.
+  // Stopping them: grey, the stopped mark folded into the lead (those already stopped counted in).
   await pane.press({ key: 'gear-group-wf_c' })
   await pane.press({ key: 'stop-all-wf_c' })
   await held5
-  expect(await chipOf(pane, 'wf_c')).toBe('⏹ 2 stopping… · ✗ 1 · ✓ 1')
-  expect(await atWidths('wf_c')).toEqual(['⏹ 2 stopping… ✗1', '⏹2… ✗1'])
+  expect(await chipOf(pane, 'wf_c')).toBe('⏹ 3… · ✗ 1 · ✓ 1')
+  expect(await atWidths('wf_c')).toEqual(['⏹3… ✗1 ✓1', '⏹3… ✗1 ✓1'])
 
   // None runs and the run hasn't said it ended: idle (it may be between phases), its quiet time counting.
   await end('agent-c1', 'aborted')
   await end('agent-c5', 'aborted')
-  expect(await chipOf(pane, 'wf_c')).toBe('○ idle · ✗ 1 · ⏹ 3 · ✓ 1')
-  expect(await atWidths('wf_c')).toEqual(['○ idle ✗1 ⏹3', '○ ✗1'])
+  expect(await chipOf(pane, 'wf_c')).toBe('○ · ✗ 1 · ⏹ 3 · ✓ 1')
+  expect(await atWidths('wf_c')).toEqual(['○ ✗1 ⏹3 ✓1', '○ ✗1 ⏹3 ✓1'])
   expect((await pane.find({ key: 'status-wf_c' }))?.children[1]).toMatchObject({ type: 'Client' })
   expect(await pane.find({ text: '0s', in: 'idle-wf_c' })).toBeTruthy()
   await pane.advance(65_000)
   expect(await pane.find({ text: '1m 05s', in: 'idle-wf_c' })).toBeTruthy()
   expect((await card('wf_c'))?.borderDimColor).toBe(true)
 
-  // Its run's notification says it was stopped: that's the lead, and only failures stay beside it.
+  // Its run's notification says it was stopped: that's the lead, the agents it had beside it.
   await notify('toolu_c', 'killed')
-  expect(await chipOf(pane, 'wf_c')).toBe('⏹ stopped · ✗ 1')
-  expect(await atWidths('wf_c')).toEqual(['⏹ stopped ✗1', '⏹ ✗1'])
+  expect(await chipOf(pane, 'wf_c')).toBe('⏹ 3 · ✗ 1 · ✓ 1')
+  expect(await atWidths('wf_c')).toEqual(['⏹3 ✗1 ✓1', '⏹3 ✗1 ✓1'])
 
   // Resumed by a new call: how the last call ended no longer holds. The launch names the run, so
   // the new call's end counts though its agents carry no call.
   launches.toolu_c2 = { status: 'async_launched', taskId: 'bg_c2', runId: 'wf_c', workflowName: 'store-switch-design' }
   await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_c2', input: {} })
-  expect(await chipOf(pane, 'wf_c')).toBe('○ idle · ✗ 1 · ⏹ 3 · ✓ 1')
+  expect(await chipOf(pane, 'wf_c')).toBe('○ · ✗ 1 · ⏹ 3 · ✓ 1')
   await spawn('', 'wf_c', 6) // agent-c6
-  expect(await chipOf(pane, 'wf_c')).toBe('● 1 working · ✗ 1 · ⏹ 3 · ✓ 1')
+  expect(await chipOf(pane, 'wf_c')).toBe('● 1 · ✗ 1 · ⏹ 3 · ✓ 1')
   await end('agent-c6', 'answer')
   await notify('toolu_c2', 'completed')
-  expect(await chipOf(pane, 'wf_c')).toBe('✓ done · ✗ 1 · ⏹ 3')
+  expect(await chipOf(pane, 'wf_c')).toBe('✓ 2 · ✗ 1 · ⏹ 3')
 
   // A run whose script completed reads done, its failures beside it; one whose script threw says so.
   await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_d', input: { script: SCRIPT } })
@@ -700,14 +720,14 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   await end('agent-c7', 'answer')
   await end('agent-c8', 'error')
   await notify('toolu_d', 'completed')
-  expect(await chipOf(pane, 'wf_d')).toBe('✓ done · ✗ 1')
+  expect(await chipOf(pane, 'wf_d')).toBe('✓ 1 · ✗ 1')
   await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_e', input: { script: SCRIPT } })
   await spawn('toolu_e', 'wf_e', 1) // agent-c9
   await end('agent-c9', 'answer')
   await notify('toolu_e', 'failed')
-  expect(await chipOf(pane, 'wf_e')).toBe('✗ script failed')
+  expect(await chipOf(pane, 'wf_e')).toBe('⚠ script failed')
 
-  // Runs that never say they ended read idle, then, once quiet ten minutes, a guess from their agents.
+  // Runs that never say they ended read idle, then, once quiet ten minutes, what their agents did.
   const quietRuns = [['wf_f', 'agent-c10', 'answer'], ['wf_g', 'agent-c11', 'error'], ['wf_h', 'agent-c12', 'aborted']] as const
   for (const [run, id, reason] of quietRuns) {
     await clock.advance(1_000) // a second apart, so wf_h is the newest
@@ -715,35 +735,97 @@ test('a card\'s status chip says where its group stands, at any width', async ($
     await spawn(`toolu_${run}`, run, 1)
     await end(id, reason)
   }
-  expect(await chipOf(pane, 'wf_f')).toBe('○ idle · ✓ 1')
-  expect(await chipOf(pane, 'wf_g')).toBe('○ idle · ✗ 1')
-  expect(await chipOf(pane, 'wf_h')).toBe('○ idle · ⏹ 1')
+  expect(await chipOf(pane, 'wf_f')).toBe('○ · ✓ 1')
+  expect(await chipOf(pane, 'wf_g')).toBe('○ · ✗ 1')
+  expect(await chipOf(pane, 'wf_h')).toBe('○ · ⏹ 1')
   await clock.advance(10 * 60_000)
-  expect(await chipOf(pane, 'wf_f')).toBe('✓ done?')
-  expect(await chipOf(pane, 'wf_g')).toBe('✗ 1 failed?')
-  expect(await chipOf(pane, 'wf_h')).toBe('⏹ stopped?')
-  expect(await atWidths('wf_g')).toEqual(['✗ 1 failed?', '✗1?'])
+  expect(await chipOf(pane, 'wf_f')).toBe('✓ done')
+  expect(await chipOf(pane, 'wf_g')).toBe('✗ 1 failed')
+  expect(await chipOf(pane, 'wf_h')).toBe('⏹ stopped')
+  expect(await atWidths('wf_g')).toEqual(['✗ 1 failed', '✗1'])
   // With every card over, only the newest is unfolded.
   expect(await isOpen('wf_h')).toBe(true)
   expect(await isOpen('wf_f')).toBe(false)
 
   // A new agent wakes a quiet run up; working or between phases, it alone is unfolded.
   await spawn('toolu_wf_f', 'wf_f', 2) // agent-c13
-  expect(await chipOf(pane, 'wf_f')).toBe('● 1 working · ✓ 1')
+  expect(await chipOf(pane, 'wf_f')).toBe('● 1 · ✓ 1')
   await end('agent-c13', 'answer')
-  expect(await chipOf(pane, 'wf_f')).toBe('○ idle · ✓ 2')
+  expect(await chipOf(pane, 'wf_f')).toBe('○ · ✓ 2')
   expect(await isOpen('wf_f')).toBe(true)
   expect(await isOpen('wf_h')).toBe(false)
   expect(await isOpen('wf_d')).toBe(false)
 
-  // Plain subagents have no run to end: once none runs, their own outcome, no guess, and their own
+  // Plain subagents have no run to end: once none runs, their own outcome, and their own
   // task notification changes nothing.
   await spawn('toolu_s', undefined, 1) // agent-c14
   await end('agent-c14', 'answer')
   expect(await chipOf(pane, 'subagents')).toBe('✓ done')
   await notify('toolu_s', 'failed')
   expect(await chipOf(pane, 'subagents')).toBe('✓ done')
+
+  // Beside marks a lead counts its own kind, a zero too: a run that completed with none of its
+  // agents done, and one stopped between phases with none caught stopping.
+  await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_i', input: { script: SCRIPT } })
+  await spawn('toolu_i', 'wf_i', 1) // agent-c15
+  await end('agent-c15', 'error')
+  await notify('toolu_i', 'completed')
+  expect(await chipOf(pane, 'wf_i')).toBe('✓ 0 · ✗ 1')
+  expect(await atWidths('wf_i')).toEqual(['✓0 ✗1', '✓0 ✗1'])
+  await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_j', input: { script: SCRIPT } })
+  await spawn('toolu_j', 'wf_j', 1) // agent-c16
+  await end('agent-c16', 'answer')
+  await notify('toolu_j', 'killed')
+  expect(await chipOf(pane, 'wf_j')).toBe('⏹ 0 · ✓ 1')
+  expect(await atWidths('wf_j')).toEqual(['⏹0 ✓1', '⏹0 ✓1'])
+  // A script that threw keeps its word: its done agents are no mark beside it.
+  expect(await chipOf(pane, 'wf_e')).toBe('⚠ script failed')
+
+  // A paused subagent beside one done: both, at any width.
+  await spawn('toolu_s2', undefined, 2) // agent-c17
+  await pane.press({ key: 'gear-agent-c17' })
+  await pane.press({ key: 'pause-agent-c17' })
+  const held17 = request('agent-c17')
+  await clock.settle()
+  expect(await chipOf(pane, 'subagents')).toBe('⏸ 1 · ✓ 1')
+  expect(await atWidths('subagents')).toEqual(['⏸1 ✓1', '⏸1 ✓1'])
+  await pane.press({ key: 'pause-agent-c17' })
+  await held17
+  await end('agent-c17', 'answer')
+  expect(await chipOf(pane, 'subagents')).toBe('✓ done')
   await pane.unmount()
+})
+
+test('agent rows hide no column at any width, cutting the name short, then go on two lines', async ($, on) => {
+  let clock = 3_000_000
+  on('clock.now', () => ({ value: (clock += 1000) }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  await $.command.run({ command: 'workflows', args: 'demo' })
+  const at = async (columns: number, surface: 'terminal' | 'desktop') => {
+    const props = { title: 'Workflows', isFocused: false, bodyColumns: columns }
+    const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface, component: 'Pane', requestId: 'workflow-monitor', props, viewport: { columns, rows: 60 } })
+    const headers = await Promise.all(['Model', 'Effort', 'Tokens', 'Time', 'Cost'].map(async text => !!(await pane.find({ text }))))
+    const seen = {
+      // Column form: every header; two lines: none of them.
+      columns: headers.every(Boolean) ? true : headers.some(Boolean) ? 'some' : false,
+      effort: (await pane.findAll({ text: 'Extra high' })).some(x => x.type === 'Text' && x.props.color === 'error'),
+      // Each agent's own cost, dim (the card's total is red).
+      cost: (await pane.findAll({ text: /^\$\d/ })).some(x => x.type === 'Text' && x.props.dimColor),
+      // The agent's name ends in an ellipsis where its column is short, rather than wrapping.
+      cut: (await pane.findAll({ text: /^design:api-contract/ })).some(x => x.type === 'Text' && x.props.wrap === 'truncate-end'),
+    }
+    await pane.unmount()
+    return seen
+  }
+  const all = { effort: true, cost: true, cut: true }
+  expect(await at(110, 'desktop')).toEqual({ columns: true, ...all })
+  // Narrower, the name gets what's left, 12 columns at the least (the desktop's row button takes
+  // three more than the terminal's).
+  expect(await at(72, 'desktop')).toEqual({ columns: true, ...all })
+  expect(await at(69, 'terminal')).toEqual({ columns: true, ...all })
+  // A column less and each agent goes on two lines, its effort and cost among the rest.
+  expect(await at(71, 'desktop')).toEqual({ columns: false, ...all })
+  expect(await at(68, 'terminal')).toEqual({ columns: false, ...all })
 })
 
 test('a workflow takes its name and phases from its launch, as the call\'s input reaches the mod empty', async ($, on) => {
