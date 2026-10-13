@@ -10,6 +10,14 @@
       "version": "1.0.0",
       "category": "productivity",
       "tags": ["skill", "workflows", "subagents", "ultracode", "cost"]
+    },
+    {
+      "name": "workflow-monitor",
+      "source": "./mods/workflow-monitor",
+      "description": "Live pane of running workflows and subagents: model, effort, tokens, time and estimated cost.",
+      "version": "0.1.0",
+      "category": "productivity",
+      "tags": ["mod", "workflows", "subagents", "cost", "pane"]
     }
   ]
 }

@@ -41,3 +41,6 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+
+# --- Types the engine lays beside a loaded mod (regenerated each load) ---
+.claude-plugin/types/

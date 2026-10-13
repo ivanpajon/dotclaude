@@ -1,0 +1,9 @@
+{
+  "name": "workflow-monitor",
+  "version": "0.1.0",
+  "description": "Live pane of running workflows and subagents: model, effort, tokens, time and estimated cost.",
+  "author": { "name": "Ivan Pajon", "url": "https://github.com/ivanpajon" },
+  "repository": "https://github.com/ivanpajon/dotclaude",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
