@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { AgentRow, AgentStatus, AgentUsage, Control, ControlItem, Idle, LogEntry, Override, WorkflowMeta } from '../types'
+import type { AgentRow, AgentStatus, AgentUsage, Control, ControlItem, Idle, LogEntry, Override, RunOutcome, WorkflowMeta } from '../types'
 
 const PANE = 'workflow-monitor'
 const INSPECT = 'workflow-monitor-agent'
@@ -15,6 +15,9 @@ const STOP_TEXT = '(Stopped from the workflow monitor before it finished.)'
 
 const agents = atom({ plugin: 'workflow-monitor', key: 'agents' } as const, [] as AgentRow[])
 const workflows = atom({ plugin: 'workflow-monitor', key: 'workflows' } as const, {} as Record<string, WorkflowMeta>)
+const calls = atom({ plugin: 'workflow-monitor', key: 'calls' } as const, {} as Record<string, string>)
+const outcomes = atom({ plugin: 'workflow-monitor', key: 'outcomes' } as const, {} as Record<string, RunOutcome>)
+const quiet = atom({ plugin: 'workflow-monitor', key: 'quiet' } as const, {} as Record<string, number>)
 const agentOverrides = atom({ plugin: 'workflow-monitor', key: 'agentOverrides' } as const, {} as Record<string, Override>)
 const groupOverrides = atom({ plugin: 'workflow-monitor', key: 'groupOverrides' } as const, {} as Record<string, Override>)
 const editing = atom({ plugin: 'workflow-monitor', key: 'editing' } as const, null as string | null)
@@ -163,6 +166,49 @@ function parseMeta(script: string): WorkflowMeta | undefined {
   return { name, description: str('description'), phases }
 }
 
+// The background tasks a task notification reports as ended: the call that started each, and how
+// it ended. Each `<task-notification>` block names its call and status before its result text.
+function endedTasks(text: string): { toolUseId: string; status: string }[] {
+  return text.split('<task-notification>').slice(1).flatMap(block => {
+    const toolUseId = /<tool-use-id>\s*([^<\s]+)\s*<\/tool-use-id>/.exec(block)?.[1]
+    const status = /<status>\s*([^<\s]+)\s*<\/status>/.exec(block)?.[1]
+    return toolUseId && status ? [{ toolUseId, status }] : []
+  })
+}
+const OUTCOMES: readonly RunOutcome[] = ['completed', 'failed', 'killed']
+
+// Records how the listed workflow runs a task notification reports on ended, by run: the Workflow
+// call it names launched or resumed the run (its launch result says, or its agents carry the call).
+// A plain subagent's own notification is left out.
+async function noteRunEnds($: Parameters<typeof read>[0], text: string) {
+  const list = (await read($, agents)).filter(a => a.runId)
+  const runOf: Record<string, string> = { ...Object.fromEntries(list.filter(a => a.toolUseId).map(a => [a.toolUseId, a.runId!])), ...(await read($, calls)) }
+  const listed = new Set(list.map(a => a.runId))
+  const ended = endedTasks(text).filter(t => listed.has(runOf[t.toolUseId]) && (OUTCOMES as readonly string[]).includes(t.status))
+  if (!ended.length) return
+  await update($, outcomes, all => ({ ...all, ...Object.fromEntries(ended.map(x => [runOf[x.toolUseId], x.status as RunOutcome])) }))
+}
+
+// What a Workflow call's launch result says (the tool's own record): the run, the script's
+// `meta.name` and description, and where the script was saved.
+type Launch = { runId?: string; workflowName?: string; summary?: string; scriptPath?: string }
+
+// Remembers a workflow's name and phases by its run, and which run the call launched or resumed.
+// The call's input reaches plugins empty, so the name comes from the launch result and the phases
+// from the saved script; an input that does carry the script (or a name) is read first.
+async function noteLaunch($: Parameters<typeof read>[0], toolUseId: string, input: { script?: string; name?: string; scriptPath?: string }, launch: Launch | undefined) {
+  const run = launch?.runId || undefined
+  const path = launch?.scriptPath ?? input.scriptPath
+  const script = input.script ?? (path ? await $.fs.read(path).catch(() => undefined) : undefined)
+  const name = input.name ?? launch?.workflowName ?? path?.split(/[\\/]/).pop()?.replace(/\.[a-z]+$/, '')
+  const meta = (typeof script === 'string' && parseMeta(script)) || (name ? { name, description: launch?.summary, phases: [] } : undefined)
+  if (meta) await update($, workflows, all => ({ ...all, [run ?? toolUseId]: meta }))
+  if (!run) return
+  await update($, calls, all => ({ ...all, [toolUseId]: run }))
+  // A new call for a run (a resume) starts it again: how it ended before no longer holds.
+  if ((await read($, outcomes))[run]) await update($, outcomes, ({ [run]: _, ...rest }) => rest)
+}
+
 // An agent's phase: its label's prefix (`investigate:x`) matched to a phase title.
 function phaseOf(label: string, phases: string[]): string | undefined {
   const prefix = label.split(':')[0]?.trim().toLowerCase()
@@ -234,6 +280,63 @@ async function setControl($: Parameters<typeof read>[0], ids: string[], v: Contr
 // An agent is working while it runs with no pause or stop asked of it; only then does its time count.
 function isWorking(a: AgentRow, ctl: Record<string, Control>): boolean {
   return a.status === 'running' && !ctl[a.id]
+}
+
+// How long a workflow run may stay quiet (no agent running, no word of its end) before its card
+// reads as likely over rather than between phases.
+const QUIET_MS = 10 * 60_000
+
+// A group's agents by where each stands. Paused counts those still pausing (not yet held).
+type Tally = { working: number; paused: number; pausing: number; stopping: number; done: number; failed: number; stopped: number }
+function tallyOf(rows: AgentRow[], ctl: Record<string, Control>, holding: Record<string, boolean>): Tally {
+  const t: Tally = { working: 0, paused: 0, pausing: 0, stopping: 0, done: 0, failed: 0, stopped: 0 }
+  for (const r of rows) {
+    if (r.status !== 'running') t[r.status]++
+    else if (ctl[r.id] === 'pause') { t.paused++; if (!holding[r.id]) t.pausing++ }
+    else if (ctl[r.id] === 'stop') t.stopping++
+    else t.working++
+  }
+  return t
+}
+
+// What a card's status chip says of its group, the first that holds: some agent works; else some
+// is paused; else some is stopping; else none runs and the run's own end decides (a workflow), or
+// it may be between phases (idle) until it has been quiet a while; else the agents' own outcome,
+// marked a guess on a workflow whose end never came.
+type GroupState =
+  | { kind: 'working' | 'paused' | 'stopping' }
+  | { kind: 'idle'; since: number }
+  | { kind: 'done' | 'stopped' | 'script-failed' | 'failed'; guess?: boolean }
+function groupState(rows: AgentRow[], t: Tally, isWorkflow: boolean, outcome: RunOutcome | undefined, isQuiet: boolean): GroupState {
+  if (t.working) return { kind: 'working' }
+  if (t.paused) return { kind: 'paused' }
+  if (t.stopping) return { kind: 'stopping' }
+  if (outcome === 'killed') return { kind: 'stopped' }
+  if (outcome === 'failed') return { kind: 'script-failed' }
+  if (outcome === 'completed') return { kind: 'done' }
+  if (isWorkflow && !isQuiet) return { kind: 'idle', since: lastEnd(rows) }
+  const guess = isWorkflow || undefined
+  return t.done ? { kind: 'done', guess } : t.failed ? { kind: 'failed', guess } : { kind: 'stopped', guess }
+}
+const isActive = (s: GroupState) => s.kind === 'working' || s.kind === 'paused' || s.kind === 'stopping' || s.kind === 'idle'
+
+// A group's last agent start or end.
+const lastEnd = (rows: AgentRow[]) => Math.max(...rows.map(r => r.endedAt ?? r.startedAt))
+
+// Marks workflow runs gone quiet: no agent running and no word of their end for a while. Each mark
+// keeps the last start or end it was judged from, so an agent starting or ending since leaves it
+// stale (see the Pane's `isQuiet`) with nothing to clear.
+async function noteQuiet($: Parameters<typeof read>[0], t: number) {
+  const list = await read($, agents)
+  const ends = await read($, outcomes)
+  const marked = await read($, quiet)
+  const runs = new Map<string, AgentRow[]>()
+  for (const a of list) if (a.runId) runs.set(a.runId, [...(runs.get(a.runId) ?? []), a])
+  const lapsed = [...runs].filter(([run, rows]) => marked[run] !== lastEnd(rows)
+    && rows.every(r => r.status !== 'running')
+    && !ends[run]
+    && lastEnd(rows) + QUIET_MS <= t)
+  if (lapsed.length) await update($, quiet, all => ({ ...all, ...Object.fromEntries(lapsed.map(([run, rows]) => [run, lastEnd(rows)])) }))
 }
 
 // A workflow's counter stops while none of its agents is working (all paused, stopping or done
@@ -314,6 +417,11 @@ async function removeAgents($: Parameters<typeof read>[0], ids: string[]) {
     await update($, collapsed, all => without(all, emptied))
     // Its model and effort too: with no card left to show them, they'd apply unseen.
     await update($, groupOverrides, all => without(all, emptied))
+    // And what the monitor knew of the run: its name, how it ended, whether it went quiet, its calls.
+    await update($, workflows, all => without(all, emptied))
+    await update($, outcomes, all => without(all, emptied))
+    await update($, quiet, all => without(all, emptied))
+    await update($, calls, all => Object.fromEntries(Object.entries(all).filter(([, run]) => !emptied.has(run))))
   }
   for (const g of emptied) foldedNow.delete(g)
 }
@@ -439,8 +547,6 @@ function demoSeed(t: number): { rows: AgentRow[]; logs: Record<string, LogEntry[
   return { rows, logs }
 }
 
-// One second of the demo, written only when something changed, as real agents are: Pause and
-// Stop land at once, and every other second one working agent finishes a model step.
 // Takes the demo away: its rows as Remove does, then anything else keyed by a demo id (a tick
 // that read the demo just before its rows went may still have written some).
 async function clearDemo($: Parameters<typeof read>[0]) {
@@ -457,6 +563,8 @@ async function clearDemo($: Parameters<typeof read>[0]) {
   await update($, held, all => without(all, demo))
 }
 
+// One second of the demo, written only when something changed, as real agents are: Pause and
+// Stop land at once, and every other second one working agent finishes a model step.
 async function demoTick($: Parameters<typeof read>[0], t: number) {
   const ctl = await read($, controls)
   const holding = await read($, held)
@@ -477,7 +585,7 @@ async function demoTick($: Parameters<typeof read>[0], t: number) {
   if (!stopped.length && !stepper) return
 
   if (stopped.length) await closeSettings($, stopped)
-  await update($, agents, list => list.map(a => {
+  const list = await update($, agents, all => all.map(a => {
     if (stopped.includes(a.id)) return { ...a, status: 'stopped' as const, endedAt: t }
     if (a.id !== stepper?.id) return a
     const out = 400 + (a.label.length * 37 + second) % 700
@@ -494,6 +602,10 @@ async function demoTick($: Parameters<typeof read>[0], t: number) {
   })
   for (const id of stopped) stopRequested.delete(id)
   if (stopped.length) await update($, controls, all => Object.fromEntries(Object.entries(all).filter(([id]) => !stopped.includes(id))))
+  // The demo's agents only end when stopped: its run is over, stopped, once none of them runs.
+  if (stopped.some(id => list.find(a => a.id === id)?.runId) && !list.some(a => a.runId === 'wf_demo' && a.status === 'running')) {
+    await update($, outcomes, all => ({ ...all, wf_demo: 'killed' as const }))
+  }
 }
 
 export const register: Register = on => {
@@ -517,12 +629,15 @@ export const register: Register = on => {
     // A reload starts this module afresh: pick up the pauses and stops already asked for.
     for (const [id, v] of Object.entries(await read($, controls))) (v === 'pause' ? pauseRequested : stopRequested).add(id)
     // Elapsed times tick by themselves on the surface (./ticker.tsx): nothing here redraws the
-    // pane on a clock, so it redraws only when something changes. The demo's agents run on this.
+    // pane on a clock, so it redraws only when something changes. A run going quiet does (see
+    // noteQuiet), and the demo's agents run on this.
     $.clock.every(1000, () => {
       void (async () => {
+        const t = await $.clock.now()
+        await noteQuiet($, t)
         const list = await read($, agents)
         if (!list.some(a => a.id.startsWith(DEMO) && a.status === 'running')) return
-        await demoTick($, await $.clock.now())
+        await demoTick($, t)
       })()
     })
 
@@ -543,7 +658,7 @@ export const register: Register = on => {
       await clearDemo($)
       await update($, workflows, all => ({
         ...all,
-        toolu_demo: { name: 'checkout-redesign', description: 'Investigate the checkout flow, design the fixes, and review them (demo data).', phases: ['Investigate', 'Design', 'Review'] },
+        wf_demo: { name: 'checkout-redesign', description: 'Investigate the checkout flow, design the fixes, and review them (demo data).', phases: ['Investigate', 'Design', 'Review'] },
       }))
       await update($, agents, list => [...list, ...seed.rows])
       await update($, logs, all => ({ ...all, ...seed.logs }))
@@ -559,14 +674,23 @@ export const register: Register = on => {
     return { text: 'Workflow monitor opened.' }
   })
 
-  // Remember a workflow's name and phases, keyed by the call its agents will carry.
-  on('tool.call', { tool: 'Workflow' }, async ($, e, next) => {
-    const input = e.input as { script?: string; name?: string; scriptPath?: string }
-    const meta = (input.script && parseMeta(input.script))
-      || (input.name || input.scriptPath ? { name: input.name ?? input.scriptPath!.split(/[\\/]/).pop()!.replace(/\.[a-z]+$/, ''), phases: [] } : undefined)
-    if (meta) await update($, workflows, all => ({ ...all, [e.tool_use_id]: meta }))
+  // A workflow run's end: its task notification names the Workflow call and how the run ended.
+  // Until then a run with no agent running may only be between phases.
+  // Every prompt passes here, so nothing this notes can hold one up.
+  on('prompt.submit', async ($, e, next) => {
+    if (e.origin.kind === 'task-notification') await noteRunEnds($, e.text).catch(() => {})
 
     return next(e)
+  })
+
+  // A workflow's name and phases, and the run the call launched or resumed (see noteLaunch). The
+  // Workflow tool runs in the background: its result is the launch, back at once.
+  on('tool.call', { tool: 'Workflow' }, async ($, e, next) => {
+    const done = await next(e)
+    const launch = 'result' in done && !done.isError && typeof done.result === 'object' ? done.result as Launch : undefined
+    await noteLaunch($, e.tool_use_id, (e.input ?? {}) as { script?: string; name?: string; scriptPath?: string }, launch).catch(() => {})
+
+    return done
   })
 
   // A stopped agent runs no more tools: the calls it already asked for are refused.
@@ -601,6 +725,8 @@ export const register: Register = on => {
     // A workflow archived between its phases comes back whole when its next agent starts; an
     // agent started again under its old id comes back too.
     await restoreAgents($, row.runId ? list.filter(a => a.runId === row.runId).map(a => a.id) : [row.id])
+    // A run that starts an agent goes on (a resumed one): how it ended before no longer holds.
+    if (row.runId && (await read($, outcomes))[row.runId]) await update($, outcomes, ({ [row.runId!]: _, ...rest }) => rest)
     await syncIdle($, list, await read($, controls))
     if (!before.some(a => a.status === 'running')) void $.ui.open({ id: PANE, title: TITLE })
 
@@ -742,6 +868,8 @@ export const register: Register = on => {
     const arch = await read($, archived)
     const archOpen = await read($, archiveOpen)
     const idleBy = await read($, idle)
+    const ends = await read($, outcomes)
+    const lapsed = await read($, quiet)
     const tick = Math.max(await $.clock.now(), ...list.map(a => a.endedAt ?? a.startedAt), 0)
     const width = e.props.bodyColumns ?? e.viewport?.columns ?? 100
     // Wide: every column. Medium: no effort/cost columns. Narrow: each agent on two lines.
@@ -757,22 +885,30 @@ export const register: Register = on => {
       )
     }
 
-    // Group by workflow run; plain subagents share one group. Running groups first, then newest.
-    // Archived agents leave their cards for the Archived section at the end.
+    // Group by workflow run; plain subagents share one group. Groups still going first (working,
+    // paused, stopping or between phases), then newest. Archived agents leave their cards for the
+    // Archived section at the end.
     const grouped = (rows: AgentRow[]) => {
       const byGroup = new Map<string, AgentRow[]>()
       for (const a of rows) byGroup.set(groupKey(a), [...(byGroup.get(groupKey(a)) ?? []), a])
       return byGroup
     }
     const shown = list.filter(a => !arch[a.id])
-    const ordered = [...grouped(shown).entries()].sort(([, a], [, b]) => {
-      const live = (rows: AgentRow[]) => (rows.some(r => r.status === 'running') ? 1 : 0)
-      return live(b) - live(a) || Math.max(...b.map(r => r.startedAt)) - Math.max(...a.map(r => r.startedAt))
-    })
+    const board = [...grouped(shown).entries()]
+    const tallies = new Map(board.map(([key, rows]) => [key, tallyOf(rows, ctl, holding)]))
+    // A run is quiet while its mark still holds its last start or end, archived agents included.
+    const isQuiet = (key: string) => lapsed[key] !== undefined && lapsed[key] === lastEnd(list.filter(a => groupKey(a) === key))
+    const states = new Map(board.map(([key, rows]) =>
+      [key, groupState(rows, tallies.get(key)!, key !== SUBAGENTS, ends[key], isQuiet(key))]))
+    const active = (key: string) => isActive(states.get(key)!)
+    const ordered = board.sort(([ka, a], [kb, b]) =>
+      Number(active(kb)) - Number(active(ka)) || Math.max(...b.map(r => r.startedAt)) - Math.max(...a.map(r => r.startedAt)))
     // Most recently archived first.
     const shelf = [...grouped(list.filter(a => arch[a.id])).entries()]
       .sort(([, a], [, b]) => Math.max(...b.map(r => arch[r.id] ?? 0)) - Math.max(...a.map(r => arch[r.id] ?? 0)))
-    const anyLive = shown.some(a => a.status === 'running')
+    const anyActive = ordered.some(([key]) => active(key))
+    // A workflow's name and phases: by its run, or by a call one of its agents carries.
+    const metaOf = (key: string, rows: AgentRow[]) => metas[key] ?? rows.map(r => metas[r.toolUseId]).find(Boolean)
 
     // Time an agent spent working: frozen from a pause or stop, with earlier pauses left out.
     const worked = (r: AgentRow) => (r.pausedSince ?? r.endedAt ?? tick) - r.startedAt - (r.pausedTotal ?? 0)
@@ -930,10 +1066,47 @@ export const register: Register = on => {
       return <Text key={`bar-${key}`}>{rows.map(r => <Text color={look(r, ctl[r.id])[1]}>■</Text>)}</Text>
     }
 
+    // A card's status chip (see groupState): a lead for where the group stands, then a mark for each
+    // other kind of agent in it: ⏸ paused, ✗ failed, ⏹ stopped (not on narrow), and on wide a dim
+    // ✓ done while the group goes on. A count spells "⏸ 3" on wide, "⏸3" narrower; "…" marks agents
+    // on their way to paused or stopped; "?" an outcome guessed for a run whose end never came.
+    const chip = (key: string, s: GroupState, t: Tally) => {
+      const roomy = layout !== 'narrow'
+      const count = (glyph: string, n: number, tail = '') => (wide ? `${glyph} ${n}${tail}` : `${glyph}${n}${tail}`)
+      const guess = 'guess' in s && s.guess ? <Text color="inactive">?</Text> : null
+      const lead =
+        s.kind === 'working' ? <Text color={RUNNING}>{roomy ? `● ${t.working} working` : `●${t.working}`}</Text>
+        : s.kind === 'paused' ? <Text color="warning">{roomy ? `⏸ ${t.paused} ${t.pausing ? 'pausing…' : 'paused'}` : `⏸${t.paused}${t.pausing ? '…' : ''}`}</Text>
+        : s.kind === 'stopping' ? <Text color={STOPPED}>{roomy ? `⏹ ${t.stopping} stopping…` : `⏹${t.stopping}…`}</Text>
+        : s.kind === 'idle' ? <Text color={RUNNING} dimColor>{roomy ? '○ idle' : '○'}</Text>
+        : s.kind === 'done' ? <Text color="success">{roomy ? '✓ done' : '✓'}{guess}</Text>
+        : s.kind === 'stopped' ? <Text color={STOPPED}>{roomy ? '⏹ stopped' : '⏹'}{guess}</Text>
+        : s.kind === 'script-failed' ? <Text color="error">{roomy ? '✗ script failed' : '✗'}</Text>
+        : <Text color="error">{roomy ? `✗ ${t.failed} failed` : `✗${t.failed}`}{guess}</Text>
+      const marks = [
+        s.kind !== 'paused' && t.paused > 0 && <Text key="paused" color="warning">{count('⏸', t.paused, t.pausing ? '…' : '')}</Text>,
+        s.kind !== 'failed' && t.failed > 0 && <Text key="failed" color="error">{count('✗', t.failed)}</Text>,
+        roomy && s.kind !== 'stopped' && s.kind !== 'stopping' && t.stopped + t.stopping > 0
+          && <Text key="stopped" color={STOPPED}>{count('⏹', t.stopped + t.stopping, t.stopping ? '…' : '')}</Text>,
+        wide && isActive(s) && t.done > 0 && <Text key="done" color="success" dimColor>{count('✓', t.done)}</Text>,
+      ].filter(Boolean)
+      // Between phases, how long since its last agent ended, counting on the surface.
+      const quietFor = s.kind === 'idle' && (Client
+        ? <Client key={`idle-${key}`} module="./ticker.tsx" props={{ base: tick - s.since, rate: 1, dim: true }} />
+        : <Text dimColor>{duration(tick - s.since)}</Text>)
+      return (
+        <Box key={`status-${key}`} flexDirection="row" gap={1} flexShrink={0}>
+          {lead}
+          {quietFor}
+          {marks.flatMap((m, i) => (wide ? [<Text key={`dot-${i}`} dimColor>·</Text>, m] : [m]))}
+        </Box>
+      )
+    }
+
     const cards = ordered.map(([key, rows]) => {
-      const meta = metas[rows[0]?.toolUseId ?? '']
+      const meta = metaOf(key, rows)
       const live = rows.filter(r => r.status === 'running').length
-      const failed = rows.filter(r => r.status === 'failed').length
+      const state = states.get(key)!
       const isWorkflow = key !== SUBAGENTS
       // A workflow: wall-clock from its first agent, standing still while none of its agents works
       // (see syncIdle). Plain subagents are unrelated, so the sum of their own working times.
@@ -942,7 +1115,8 @@ export const register: Register = on => {
       const end = anyWorking ? tick : w.since ?? Math.max(...rows.map(r => r.endedAt ?? r.pausedSince ?? tick))
       const span = isWorkflow ? end - Math.min(...rows.map(r => r.startedAt)) - w.total : rows.reduce((t, r) => t + worked(r), 0)
       const rate = isWorkflow ? (anyWorking ? 1 : 0) : rows.filter(working).length
-      const isFolded = folded[key] ?? (anyLive ? live === 0 : key !== ordered[0][0])
+      // Unfolded while it goes on or waits on the person; folded once it's over.
+      const isFolded = folded[key] ?? (anyActive ? !active(key) : key !== ordered[0][0])
       foldedNow.set(key, isFolded)
       const groupOpen = open === `group:${key}`
       const go = groups[key] ?? {}
@@ -974,13 +1148,17 @@ export const register: Register = on => {
       })
 
       return (
-        <Box key={`card-${key}`} flexDirection="column" borderStyle="round" borderColor={live > 0 ? RUNNING : undefined} borderDimColor={live === 0} paddingX={1} marginBottom={1}>
+        <Box
+          key={`card-${key}`} flexDirection="column" borderStyle="round" paddingX={1} marginBottom={1}
+          borderColor={state.kind === 'working' ? RUNNING : state.kind === 'paused' ? 'warning' : undefined}
+          borderDimColor={state.kind !== 'working' && state.kind !== 'paused'}
+        >
           <Box flexDirection="row" justifyContent="space-between" gap={1}>
             <Box flexShrink={1} minWidth={0}>
               {control(button(`fold-${key}`, isWorkflow ? meta?.name ?? key : 'Subagents', { plain: true, prefix: isFolded ? '▸ ' : '▾ ', bold: true }))}
             </Box>
             <Box flexDirection="row" gap={1} flexShrink={0}>
-              {live > 0 ? <Text color={RUNNING}>● {live}{layout === 'narrow' ? '' : ' running'}</Text> : failed > 0 ? <Text color="error">✗ {failed}{layout === 'narrow' ? '' : ' failed'}</Text> : <Text color="success">✓{layout === 'narrow' ? '' : ' done'}</Text>}
+              {chip(key, state, tallies.get(key)!)}
               {control(button(`gear-group-${key}`, groupOpen ? '▴' : hasGroupOverride ? '◆' : '⚙', { plain: true }))}
               {live === 0 && control(button(`close-${key}`, '✕', { plain: true }))}
             </Box>
@@ -1027,7 +1205,7 @@ export const register: Register = on => {
         {archOpen && shelf.map(([key, rows]) => (
           <Box key={`arch-${key}`} flexDirection="row" justifyContent="space-between" gap={1} marginTop={1}>
             <Box flexDirection="column" flexShrink={1} minWidth={0}>
-              <Text wrap="truncate-end" dimColor>{key !== SUBAGENTS ? metas[rows[0]?.toolUseId ?? '']?.name ?? key : 'Subagents'}</Text>
+              <Text wrap="truncate-end" dimColor>{key !== SUBAGENTS ? metaOf(key, rows)?.name ?? key : 'Subagents'}</Text>
               <Text wrap="truncate-end" color="inactive">
                 {rows.length} {rows.length === 1 ? 'agent' : 'agents'} · {tokens(sumTokens(rows))} tokens · {money(sumCost(rows))}
               </Text>

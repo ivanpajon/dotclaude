@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 const SURFACES = ['terminal', 'desktop'] as const
 const USAGE = { input_tokens: 1000, output_tokens: 2000, cache_read_input_tokens: 10000, cache_creation_input_tokens: 0, model: 'claude-opus-5-5' }
@@ -8,6 +8,9 @@ const SCRIPT = `export const meta = {
   phases: [{ title: 'Investigate' }, { title: 'Critique' }],
 }
 phase('Investigate')`
+// A background task's end, as its notification reaches the session.
+const ended = (toolUseId: string, status: string) =>
+  `<task-notification>\n<task-id>bg_${toolUseId}</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n<status>${status}</status>\n<summary>Workflow ${status}</summary>\n</task-notification>`
 
 test('tracks a workflow agent, applies overrides, and pauses, stops and inspects it', async ($, on) => {
   let n = 0
@@ -373,6 +376,7 @@ test('finished cards close to Archived, come back, and can be removed for good',
   on('tool.call', () => ({ result: 'launched' }))
   on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: `agent-a${++n}` }))
   on('turn.complete', () => ({ text: 'ok' }))
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
   await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_a', input: { script: SCRIPT } })
   await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_b', input: { script: SCRIPT.replace('store-switch-design', 'other-run') } })
   const spawn = (toolUseId: string, runId: string | undefined, index: number) => $.agent.spawn({
@@ -421,6 +425,9 @@ test('finished cards close to Archived, come back, and can be removed for good',
   expect(await has('restore-wf_a')).toBe(false)
   expect(await has('close-wf_a')).toBe(false)
   await finish('agent-a5')
+  // Its run's end comes as the Workflow task's notification: the card reads done, and folds.
+  await $.prompt.submit({ text: ended('toolu_a', 'completed'), wait: false, origin: { kind: 'task-notification' } })
+  expect((await pane.find({ key: 'status-wf_a' }))?.text).toBe('✓ done')
 
   // Inspecting one of its agents, then removing the card: it leaves the monitor, and Inspect lets go.
   await pane.press({ key: 'fold-wf_a' })
@@ -562,5 +569,215 @@ test('/workflows clear and a fresh /workflows demo leave nothing of the old behi
   expect(await has('fold-wf_demo')).toBe(false)
   expect(await has('fold-wf_live')).toBe(true)
   expect(await pane.find({ text: /⏸/ })).toBeFalsy()
+  await pane.unmount()
+})
+
+test('a card\'s status chip says where its group stands, at any width', async ($, on) => {
+  const clock = mock.clock(on, { now: 20_000_000 })
+  let n = 0
+  // What each Workflow call's launch returns, by call; one not listed launches with no record.
+  const launches: Record<string, object> = {}
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('tool.call', (_$, e) => ({ result: launches[e.tool_use_id] ?? 'launched' }))
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: `agent-c${++n}` }))
+  on('turn.step', async function* (_$, e) {
+    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: USAGE }
+  })
+  on('turn.complete', () => ({ text: 'ok' }))
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  // The session starts its clock: a run going quiet is noticed on it.
+  on('command.register', () => ({ value: { command: 'workflows' } }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
+  const spawn = (toolUseId: string, runId: string | undefined, index: number) => $.agent.spawn({
+    tool_use_id: toolUseId, prompt: 'p', description: `investigate:part-${index}`, subagentType: 'general-purpose',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false,
+    ...(runId ? { workflow: { runId, agentIndex: index } } : {}),
+  })
+  const end = (id: string, reason: 'answer' | 'aborted' | 'error') =>
+    $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: reason === 'aborted', turnId: `t-${id}`, agentId: id, reason })
+  const notify = (toolUseId: string, status: string) =>
+    $.prompt.submit({ text: ended(toolUseId, status), wait: false, origin: { kind: 'task-notification' } })
+  // An agent's next model request, read to its end: a pause holds it there until resumed.
+  const request = async (agentId: string) => {
+    const stream = $.turn.step({ turnId: `t-${agentId}`, index: 1, model: 'claude-opus-5-5', effort: 'high', messageCount: 1, agentId })
+    const it = stream[Symbol.asyncIterator]()
+    while (!(await it.next()).done) { /* read on */ }
+  }
+
+  // agent-c1..c5: two still working, one done, one failed, one stopped.
+  await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_c', input: { script: SCRIPT } })
+  for (let i = 1; i <= 5; i++) await spawn('toolu_c', 'wf_c', i)
+  await end('agent-c2', 'answer')
+  await end('agent-c3', 'error')
+  await end('agent-c4', 'aborted')
+
+  const mount = (columns: number, surface: 'terminal' | 'desktop' = 'desktop') => $.ui.mount({
+    plugin: 'workflow-monitor', surface, component: 'Pane', requestId: 'workflow-monitor',
+    props: { title: 'Workflows', isFocused: false, bodyColumns: columns }, viewport: { columns, rows: 80 },
+  })
+  const pane = await mount(110)
+  // What a card's chip reads: its segments, a space apart as the surface lays them out.
+  const shown = (node: unknown): string => (typeof node === 'string' ? node
+    : ((node as { children?: unknown[] }).children ?? []).map(shown).join(''))
+  const chipOf = async (p: typeof pane, key: string) => ((await p.find({ key: `status-${key}` }))?.children ?? [])
+    .map(shown).filter(Boolean).join(' ')
+  const card = async (key: string) => (await pane.find({ key: `card-${key}` }))?.props
+  // Unfolded: its phase rows are drawn.
+  const isOpen = async (key: string) => !!(await pane.find({ key: `cols-${key}-Investigate` }))
+  // Medium and narrow, on the terminal while the desktop holds the wide one.
+  const atWidths = async (key: string) => {
+    const out: string[] = []
+    for (const columns of [70, 44]) {
+      const p = await mount(columns, 'terminal')
+      out.push(await chipOf(p, key))
+      await p.unmount()
+    }
+    return out
+  }
+
+  // Working: the lead counts the working, then a mark for each other kind; the border is blue.
+  expect(await chipOf(pane, 'wf_c')).toBe('● 2 working · ✗ 1 · ⏹ 1 · ✓ 1')
+  expect(await atWidths('wf_c')).toEqual(['● 2 working ✗1 ⏹1', '●2 ✗1'])
+  expect((await card('wf_c'))?.borderColor).toBe('#4D9DF0')
+
+  // Pausing them all: amber, and "…" until each is held at its next request.
+  await pane.press({ key: 'gear-group-wf_c' })
+  await pane.press({ key: 'pause-all-wf_c' })
+  expect(await chipOf(pane, 'wf_c')).toBe('⏸ 2 pausing… · ✗ 1 · ⏹ 1 · ✓ 1')
+  expect(await atWidths('wf_c')).toEqual(['⏸ 2 pausing… ✗1 ⏹1', '⏸2… ✗1'])
+  expect((await card('wf_c'))?.borderColor).toBe('warning')
+  const held1 = request('agent-c1')
+  const held5 = request('agent-c5')
+  await clock.settle()
+  expect(await chipOf(pane, 'wf_c')).toBe('⏸ 2 paused · ✗ 1 · ⏹ 1 · ✓ 1')
+  expect(await atWidths('wf_c')).toEqual(['⏸ 2 paused ✗1 ⏹1', '⏸2 ✗1'])
+
+  // One resumed works again, the other still waits.
+  await pane.press({ key: 'gear-agent-c1' })
+  await pane.press({ key: 'pause-agent-c1' })
+  await held1
+  expect(await chipOf(pane, 'wf_c')).toBe('● 1 working · ⏸ 1 · ✗ 1 · ⏹ 1 · ✓ 1')
+
+  // Stopping them: grey, the stopped mark folded into the lead.
+  await pane.press({ key: 'gear-group-wf_c' })
+  await pane.press({ key: 'stop-all-wf_c' })
+  await held5
+  expect(await chipOf(pane, 'wf_c')).toBe('⏹ 2 stopping… · ✗ 1 · ✓ 1')
+  expect(await atWidths('wf_c')).toEqual(['⏹ 2 stopping… ✗1', '⏹2… ✗1'])
+
+  // None runs and the run hasn't said it ended: idle (it may be between phases), its quiet time counting.
+  await end('agent-c1', 'aborted')
+  await end('agent-c5', 'aborted')
+  expect(await chipOf(pane, 'wf_c')).toBe('○ idle · ✗ 1 · ⏹ 3 · ✓ 1')
+  expect(await atWidths('wf_c')).toEqual(['○ idle ✗1 ⏹3', '○ ✗1'])
+  expect((await pane.find({ key: 'status-wf_c' }))?.children[1]).toMatchObject({ type: 'Client' })
+  expect(await pane.find({ text: '0s', in: 'idle-wf_c' })).toBeTruthy()
+  await pane.advance(65_000)
+  expect(await pane.find({ text: '1m 05s', in: 'idle-wf_c' })).toBeTruthy()
+  expect((await card('wf_c'))?.borderDimColor).toBe(true)
+
+  // Its run's notification says it was stopped: that's the lead, and only failures stay beside it.
+  await notify('toolu_c', 'killed')
+  expect(await chipOf(pane, 'wf_c')).toBe('⏹ stopped · ✗ 1')
+  expect(await atWidths('wf_c')).toEqual(['⏹ stopped ✗1', '⏹ ✗1'])
+
+  // Resumed by a new call: how the last call ended no longer holds. The launch names the run, so
+  // the new call's end counts though its agents carry no call.
+  launches.toolu_c2 = { status: 'async_launched', taskId: 'bg_c2', runId: 'wf_c', workflowName: 'store-switch-design' }
+  await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_c2', input: {} })
+  expect(await chipOf(pane, 'wf_c')).toBe('○ idle · ✗ 1 · ⏹ 3 · ✓ 1')
+  await spawn('', 'wf_c', 6) // agent-c6
+  expect(await chipOf(pane, 'wf_c')).toBe('● 1 working · ✗ 1 · ⏹ 3 · ✓ 1')
+  await end('agent-c6', 'answer')
+  await notify('toolu_c2', 'completed')
+  expect(await chipOf(pane, 'wf_c')).toBe('✓ done · ✗ 1 · ⏹ 3')
+
+  // A run whose script completed reads done, its failures beside it; one whose script threw says so.
+  await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_d', input: { script: SCRIPT } })
+  await spawn('toolu_d', 'wf_d', 1) // agent-c7
+  await spawn('toolu_d', 'wf_d', 2) // agent-c8
+  await end('agent-c7', 'answer')
+  await end('agent-c8', 'error')
+  await notify('toolu_d', 'completed')
+  expect(await chipOf(pane, 'wf_d')).toBe('✓ done · ✗ 1')
+  await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_e', input: { script: SCRIPT } })
+  await spawn('toolu_e', 'wf_e', 1) // agent-c9
+  await end('agent-c9', 'answer')
+  await notify('toolu_e', 'failed')
+  expect(await chipOf(pane, 'wf_e')).toBe('✗ script failed')
+
+  // Runs that never say they ended read idle, then, once quiet ten minutes, a guess from their agents.
+  const quietRuns = [['wf_f', 'agent-c10', 'answer'], ['wf_g', 'agent-c11', 'error'], ['wf_h', 'agent-c12', 'aborted']] as const
+  for (const [run, id, reason] of quietRuns) {
+    await clock.advance(1_000) // a second apart, so wf_h is the newest
+    await $.tool.call({ tool: 'Workflow', tool_use_id: `toolu_${run}`, input: { script: SCRIPT } })
+    await spawn(`toolu_${run}`, run, 1)
+    await end(id, reason)
+  }
+  expect(await chipOf(pane, 'wf_f')).toBe('○ idle · ✓ 1')
+  expect(await chipOf(pane, 'wf_g')).toBe('○ idle · ✗ 1')
+  expect(await chipOf(pane, 'wf_h')).toBe('○ idle · ⏹ 1')
+  await clock.advance(10 * 60_000)
+  expect(await chipOf(pane, 'wf_f')).toBe('✓ done?')
+  expect(await chipOf(pane, 'wf_g')).toBe('✗ 1 failed?')
+  expect(await chipOf(pane, 'wf_h')).toBe('⏹ stopped?')
+  expect(await atWidths('wf_g')).toEqual(['✗ 1 failed?', '✗1?'])
+  // With every card over, only the newest is unfolded.
+  expect(await isOpen('wf_h')).toBe(true)
+  expect(await isOpen('wf_f')).toBe(false)
+
+  // A new agent wakes a quiet run up; working or between phases, it alone is unfolded.
+  await spawn('toolu_wf_f', 'wf_f', 2) // agent-c13
+  expect(await chipOf(pane, 'wf_f')).toBe('● 1 working · ✓ 1')
+  await end('agent-c13', 'answer')
+  expect(await chipOf(pane, 'wf_f')).toBe('○ idle · ✓ 2')
+  expect(await isOpen('wf_f')).toBe(true)
+  expect(await isOpen('wf_h')).toBe(false)
+  expect(await isOpen('wf_d')).toBe(false)
+
+  // Plain subagents have no run to end: once none runs, their own outcome, no guess, and their own
+  // task notification changes nothing.
+  await spawn('toolu_s', undefined, 1) // agent-c14
+  await end('agent-c14', 'answer')
+  expect(await chipOf(pane, 'subagents')).toBe('✓ done')
+  await notify('toolu_s', 'failed')
+  expect(await chipOf(pane, 'subagents')).toBe('✓ done')
+  await pane.unmount()
+})
+
+test('a workflow takes its name and phases from its launch, as the call\'s input reaches the mod empty', async ($, on) => {
+  let n = 0
+  const saved = 'C:/session/workflows/scripts/store-switch-design-wf_named.js'
+  on('clock.now', () => ({ value: 30_000_000 }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: `agent-n${++n}` }))
+  on('fs.read', (_$, e) => {
+    // The engine hands the path on as the platform spells it.
+    if (e.path.replace(/\\/g, '/') !== saved) throw new Error(`ENOENT: ${e.path}`)
+    return { value: SCRIPT }
+  })
+  // The launch names the run, the script's meta.name and where the script was saved.
+  on('tool.call', (_$, e) => ({
+    result: e.tool_use_id === 'toolu_n'
+      ? { status: 'async_launched', taskId: 'bg_n', runId: 'wf_named', workflowName: 'store-switch-design', scriptPath: saved }
+      : { status: 'async_launched', taskId: 'bg_m', runId: 'wf_unread', workflowName: 'nightly-audit', scriptPath: 'C:/gone.js' },
+  }))
+  const spawn = (toolUseId: string, runId: string) => $.agent.spawn({
+    tool_use_id: toolUseId, prompt: 'p', description: 'critique:detail-pages', subagentType: 'general-purpose',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false,
+    workflow: { runId, agentIndex: 1 },
+  })
+  await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_n', input: {} })
+  await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_m', input: {} })
+  await spawn('toolu_n', 'wf_named')
+  await spawn('toolu_m', 'wf_unread')
+  const props = { title: 'Workflows', isFocused: false, bodyColumns: 110 }
+  const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor', props, viewport: { columns: 110, rows: 60 } })
+  // The saved script gives the name, the description and the phases.
+  expect((await pane.find({ key: 'fold-wf_named' }))?.text).toContain('store-switch-design')
+  expect(await pane.find({ text: 'Investigate and design fixes' })).toBeTruthy()
+  // A script that can't be read leaves the name from the launch.
+  expect((await pane.find({ key: 'fold-wf_unread' }))?.text).toContain('nightly-audit')
   await pane.unmount()
 })

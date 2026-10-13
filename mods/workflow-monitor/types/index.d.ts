@@ -32,6 +32,9 @@ export type AgentRow = {
   pausedTotal?: number
 }
 
+/** How a workflow run ended, as its task notification said: its script finished, threw, or was stopped. */
+export type RunOutcome = 'completed' | 'failed' | 'killed'
+
 /** What the Workflow tool call's script said about itself (`export const meta`). */
 export type WorkflowMeta = {
   name: string
@@ -71,8 +74,17 @@ declare module 'claude-code' {
   interface PluginState {
     'workflow-monitor': {
       agents: AgentRow[]
-      /** Keyed by the Workflow tool call's tool_use_id. */
+      /** Keyed by workflow run id, from the Workflow call's launch result; else by the call's tool_use_id. */
       workflows: Record<string, WorkflowMeta>
+      /** The run each Workflow call launched or resumed, by the call's tool_use_id. */
+      calls: Record<string, string>
+      /** How each workflow run ended, by run id; absent while it goes on, and cleared when it starts again. */
+      outcomes: Record<string, RunOutcome>
+      /**
+       * Workflow runs that went quiet with no word of their end, by run id: the last agent start or
+       * end it was judged from. A run is shown as likely over only while that is still its last.
+       */
+      quiet: Record<string, number>
       /** Keyed by agent id. */
       agentOverrides: Record<string, Override>
       /** Keyed by group key (workflow run id, or `subagents`). */
