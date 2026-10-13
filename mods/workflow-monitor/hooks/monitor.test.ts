@@ -100,6 +100,8 @@ test('tracks a workflow agent, applies overrides, and pauses, stops and inspects
     expect(await inspect.find({ text: 'Checking the detail pages' })).toBeTruthy()
     expect(await inspect.find({ text: 'Reading the store page.' })).toBeTruthy()
     expect(await inspect.find({ text: /src\/store\.ts/ })).toBeTruthy()
+    // A tool call's dot: drawn on the desktop, a glyph elsewhere.
+    if (surface === 'desktop') expect(JSON.stringify(await inspect.drawn())).toContain('"alt":"activity"')
     await inspect.unmount()
   }
 
@@ -122,8 +124,11 @@ test('tracks a workflow agent, applies overrides, and pauses, stops and inspects
   expect(ran).not.toContain('Read')
   expect((await step('agent-2', 2)).answer).toMatch(/Stopped/)
   expect(sent.length).toBe(before + 1)
+  // Its settings panel, open until now, closes once it finishes.
+  expect(await pane.find({ key: 'model-agent-2' })).toBeTruthy()
   await $.turn.complete({ answer: 'stopped', durationMs: 1000, isAborted: false, turnId: 't-agent-2', agentId: 'agent-2', reason: 'answer' })
   expect(await pane.find({ text: '■' })).toBeTruthy()
+  expect(await pane.find({ key: 'model-agent-2' })).toBeFalsy()
 
   // Stop cuts a reply that is still streaming, without waiting for it to end.
   await spawn(3, 'critique:slow')
@@ -354,4 +359,204 @@ test('a control keeps its press handle while the panes redraw around it', async 
   expect(await inspect.find({ text: /paused/ })).toBeTruthy()
   await inspect.press({ key: 'pause-agent-k' })
   await inspect.unmount()
+})
+
+test('finished cards close to Archived, come back, and can be removed for good', async ($, on) => {
+  let clock = 13_000_000
+  let n = 0
+  on('clock.now', () => ({ value: (clock += 100) }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('tool.call', () => ({ result: 'launched' }))
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: `agent-a${++n}` }))
+  on('turn.complete', () => ({ text: 'ok' }))
+  await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_a', input: { script: SCRIPT } })
+  await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_b', input: { script: SCRIPT.replace('store-switch-design', 'other-run') } })
+  const spawn = (toolUseId: string, runId: string | undefined, index: number) => $.agent.spawn({
+    tool_use_id: toolUseId, prompt: 'p', description: `investigate:part-${index}`, subagentType: 'general-purpose',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false,
+    ...(runId ? { workflow: { runId, agentIndex: index } } : {}),
+  })
+  const finish = (id: string) => $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: `t-${id}`, agentId: id, reason: 'answer' })
+  await spawn('toolu_a', 'wf_a', 1) // agent-a1
+  await spawn('toolu_a', 'wf_a', 2) // agent-a2
+  await spawn('toolu_b', 'wf_b', 1) // agent-a3, left running
+  await spawn('toolu_s', undefined, 1) // agent-a4, a plain subagent
+  for (const id of ['agent-a1', 'agent-a2', 'agent-a4']) await finish(id)
+
+  const props = { title: 'Workflows', isFocused: false, bodyColumns: 110 }
+  const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor', props, viewport: { columns: 110, rows: 60 } })
+  const has = async (key: string) => !!(await pane.find({ key }))
+
+  // A finished card has a close button; a running one doesn't.
+  expect(await has('close-wf_a')).toBe(true)
+  expect(await has('close-wf_b')).toBe(false)
+
+  // Closing archives it: the card leaves for a folded Archived line, and Restore brings it back.
+  await pane.press({ key: 'close-wf_a' })
+  expect(await has('fold-wf_a')).toBe(false)
+  expect(await pane.find({ text: /Archived \(1\)/ })).toBeTruthy()
+  expect(await has('restore-wf_a')).toBe(false)
+  await pane.press({ key: 'archived-toggle' })
+  expect(await pane.find({ text: 'store-switch-design' })).toBeTruthy()
+  await pane.press({ key: 'restore-wf_a' })
+  expect(await has('fold-wf_a')).toBe(true)
+  expect(await has('archived-toggle')).toBe(false)
+
+  // A finished card's settings offer Archive and Remove instead of Pause and Stop all; archiving closes them.
+  await pane.press({ key: 'gear-group-wf_a' })
+  expect(await has('pause-all-wf_a')).toBe(false)
+  expect(await has('archive-wf_a')).toBe(true)
+  await pane.press({ key: 'archive-wf_a' })
+  expect(await has('fold-wf_a')).toBe(false)
+  expect(await has('model-group-wf_a')).toBe(false)
+  expect(await has('restore-wf_a')).toBe(true)
+
+  // A new agent in an archived run brings its card back.
+  await spawn('toolu_a', 'wf_a', 3) // agent-a5
+  expect(await has('fold-wf_a')).toBe(true)
+  expect(await has('restore-wf_a')).toBe(false)
+  expect(await has('close-wf_a')).toBe(false)
+  await finish('agent-a5')
+
+  // Inspecting one of its agents, then removing the card: it leaves the monitor, and Inspect lets go.
+  await pane.press({ key: 'fold-wf_a' })
+  await pane.press({ key: 'gear-agent-a1' })
+  await pane.press({ key: 'gear-group-wf_a' })
+  await pane.press({ key: 'remove-wf_a' })
+  expect(await has('fold-wf_a')).toBe(false)
+  expect(await has('archived-toggle')).toBe(false)
+  const inspect = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport: { columns: 110, rows: 40 } })
+  expect(await inspect.find({ text: /Pick Inspect/ })).toBeTruthy()
+  await inspect.unmount()
+
+  // Remove all takes everything archived; the running workflow stays.
+  await pane.press({ key: 'close-subagents' })
+  expect(await pane.find({ text: /Archived \(1\)/ })).toBeTruthy()
+  await pane.press({ key: 'purge-archived' })
+  expect(await has('archived-toggle')).toBe(false)
+  expect(await has('fold-subagents')).toBe(false)
+  expect(await has('fold-wf_b')).toBe(true)
+
+  // With every card archived the board says so; removing the last one empties the monitor.
+  await finish('agent-a3')
+  await pane.press({ key: 'close-wf_b' })
+  expect(await pane.find({ text: /everything is archived/ })).toBeTruthy()
+  await pane.press({ key: 'purge-wf_b' })
+  expect(await pane.find({ text: /No subagents yet/ })).toBeTruthy()
+  await pane.unmount()
+})
+
+test('a group can sit on the board and under Archived at once, and starts afresh once removed', async ($, on) => {
+  let clock = 14_000_000
+  let n = 0
+  let reuse: string | undefined
+  on('clock.now', () => ({ value: (clock += 100) }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('tool.call', () => ({ result: 'launched' }))
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: reuse ?? `agent-s${++n}` }))
+  on('turn.complete', () => ({ text: 'ok' }))
+  await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_r', input: { script: SCRIPT } })
+  const spawn = (index: number, runId?: string) => $.agent.spawn({
+    tool_use_id: runId ? 'toolu_r' : `toolu_s${index}`, prompt: 'p', description: `investigate:part-${index}`, subagentType: 'general-purpose',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false,
+    ...(runId ? { workflow: { runId, agentIndex: index } } : {}),
+  })
+  const finish = (id: string) => $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: `t-${id}`, agentId: id, reason: 'answer' })
+  await spawn(1) // agent-s1, a plain subagent
+  await finish('agent-s1')
+  const props = { title: 'Workflows', isFocused: false, bodyColumns: 110 }
+  const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor', props, viewport: { columns: 110, rows: 60 } })
+  const has = async (key: string) => !!(await pane.find({ key }))
+
+  // Archiving the card of the agent Inspect shows leaves Inspect on it (only Remove lets go).
+  await pane.press({ key: 'gear-agent-s1' })
+  await pane.press({ key: 'close-subagents' })
+  const inspect = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport: { columns: 110, rows: 40 } })
+  expect(await inspect.find({ text: /part-1/ })).toBeTruthy()
+  await inspect.unmount()
+
+  // A new subagent gets a card of its own while the earlier one stays archived.
+  await spawn(2) // agent-s2
+  expect(await has('fold-subagents')).toBe(true)
+  await pane.press({ key: 'archived-toggle' })
+  expect(await has('restore-subagents')).toBe(true)
+
+  // Removing the archived one leaves the live card, and its open settings, as they were.
+  await pane.press({ key: 'gear-group-subagents' })
+  expect(await has('model-group-subagents')).toBe(true)
+  await pane.press({ key: 'purge-subagents' })
+  expect(await has('archived-toggle')).toBe(false)
+  expect(await has('model-group-subagents')).toBe(true)
+  expect(await pane.find({ text: /part-2/ })).toBeTruthy()
+  expect(await pane.find({ text: /part-1/ })).toBeFalsy()
+  await pane.press({ key: 'done-group-subagents' })
+
+  // An agent started again under an archived id comes back to the board.
+  await finish('agent-s2')
+  await pane.press({ key: 'close-subagents' })
+  expect(await has('fold-subagents')).toBe(false)
+  reuse = 'agent-s2'
+  await spawn(2)
+  reuse = undefined
+  expect(await has('fold-subagents')).toBe(true)
+  expect(await has('archived-toggle')).toBe(false)
+
+  // A workflow removed and started again gets a fresh card, without the model it had set.
+  await spawn(1, 'wf_r') // agent-s3
+  await pane.press({ key: 'gear-group-wf_r' })
+  await pane.select({ key: 'model-group-wf_r', value: 'claude-haiku-5-5' })
+  await pane.press({ key: 'done-group-wf_r' })
+  expect(await pane.find({ text: '◆' })).toBeTruthy()
+  await finish('agent-s3')
+  await pane.press({ key: 'gear-group-wf_r' })
+  await pane.press({ key: 'remove-wf_r' })
+  expect(await has('fold-wf_r')).toBe(false)
+  await spawn(2, 'wf_r') // agent-s4
+  expect(await has('fold-wf_r')).toBe(true)
+  expect(await pane.find({ text: '◆' })).toBeFalsy()
+  await pane.unmount()
+})
+
+test('/workflows clear and a fresh /workflows demo leave nothing of the old behind', async ($, on) => {
+  let clock = 15_000_000
+  let n = 0
+  on('clock.now', () => ({ value: (clock += 100) }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('tool.call', () => ({ result: 'launched' }))
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: `agent-c${++n}` }))
+  on('turn.complete', () => ({ text: 'ok' }))
+  await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_c', input: { script: SCRIPT } })
+  const spawn = (index: number, runId: string) => $.agent.spawn({
+    tool_use_id: 'toolu_c', prompt: 'p', description: `investigate:part-${index}`, subagentType: 'general-purpose',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false,
+    workflow: { runId, agentIndex: index },
+  })
+  await spawn(1, 'wf_c') // agent-c1, finished and archived below
+  await spawn(2, 'wf_live') // agent-c2, left running
+  await $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 't-c1', agentId: 'agent-c1', reason: 'answer' })
+  await $.command.run({ command: 'workflows', args: 'demo' })
+  const props = { title: 'Workflows', isFocused: false, bodyColumns: 110 }
+  const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor', props, viewport: { columns: 110, rows: 80 } })
+  const has = async (key: string) => !!(await pane.find({ key }))
+  await pane.press({ key: 'close-wf_c' })
+  expect(await has('archived-toggle')).toBe(true)
+
+  // A second demo starts afresh: one demo card, and a stop asked of the first one is gone.
+  await pane.press({ key: 'gear-demo-4' })
+  await pane.press({ key: 'stop-demo-4' })
+  expect(await pane.find({ text: /stopping…/ })).toBeTruthy()
+  await $.command.run({ command: 'workflows', args: 'demo' })
+  expect(await pane.findAll({ key: 'fold-wf_demo' })).toHaveLength(1)
+  expect(await pane.find({ text: /stopping…/ })).toBeFalsy()
+  expect(await pane.find({ text: /paused/ })).toBeTruthy()
+  const call = await $.tool.call({ tool: 'Read', tool_use_id: 'toolu_d4', input: { file_path: 'a' }, agentId: 'demo-4' })
+  expect('deny' in call).toBe(false)
+
+  // Clear takes the finished, the archived and the demo; a running agent stays.
+  await $.command.run({ command: 'workflows', args: 'clear' })
+  expect(await has('archived-toggle')).toBe(false)
+  expect(await has('fold-wf_demo')).toBe(false)
+  expect(await has('fold-wf_live')).toBe(true)
+  expect(await pane.find({ text: /paused/ })).toBeFalsy()
+  await pane.unmount()
 })

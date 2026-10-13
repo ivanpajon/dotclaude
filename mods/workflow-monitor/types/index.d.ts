@@ -81,6 +81,10 @@ declare module 'claude-code' {
       editing: string | null
       /** Time each group (by group key) spent with no agent working, left out of its counter. */
       idle: Record<string, Idle>
+      /** Agents archived from the pane (closed cards), by agent id: when. Kept, and listed under Archived. */
+      archived: Record<string, number>
+      /** Whether the Archived section is unfolded. */
+      archiveOpen: boolean
       /** Groups the person folded or unfolded, by group key. */
       collapsed: Record<string, boolean>
       /** Pause or stop asked of a running agent, by agent id. */

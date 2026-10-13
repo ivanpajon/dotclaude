@@ -24,6 +24,8 @@ const held = atom({ plugin: 'workflow-monitor', key: 'held' } as const, {} as Re
 const logs = atom({ plugin: 'workflow-monitor', key: 'logs' } as const, {} as Record<string, LogEntry[]>)
 const inspecting = atom({ plugin: 'workflow-monitor', key: 'inspecting' } as const, null as string | null)
 const idle = atom({ plugin: 'workflow-monitor', key: 'idle' } as const, {} as Record<string, Idle>)
+const archived = atom({ plugin: 'workflow-monitor', key: 'archived' } as const, {} as Record<string, number>)
+const archiveOpen = atom({ plugin: 'workflow-monitor', key: 'archiveOpen' } as const, false)
 
 // USD per million tokens: [input, output, cache write (5 min), cache read].
 // Anthropic first-party list prices, 2026-10. Longer keys first: matched by substring.
@@ -241,6 +243,71 @@ async function syncIdle($: Parameters<typeof read>[0], list: AgentRow[], ctl: Re
   if (Object.keys(changes).length) await update($, idle, cur => ({ ...cur, ...changes }))
 }
 
+// A finished agent's settings panel closes: nothing in it applies any more. So does the panel of
+// a group whose card leaves the pane.
+async function closeSettings($: Parameters<typeof read>[0], ids: string[], groups: string[] = []) {
+  const open = await read($, editing)
+  if (open && (ids.some(id => open === `agent:${id}`) || groups.some(g => open === `group:${g}`))) {
+    await update($, editing, cur => (cur === open ? null : cur))
+  }
+}
+
+// A keyed value without `keys`.
+const without = <V,>(all: Record<string, V>, keys: Set<string>): Record<string, V> =>
+  Object.fromEntries(Object.entries(all).filter(([k]) => !keys.has(k)))
+
+// Brings archived agents back to their card; written only when one of them is archived.
+async function restoreAgents($: Parameters<typeof read>[0], ids: string[]) {
+  const back = new Set(ids)
+  if (Object.keys(await read($, archived)).some(id => back.has(id))) await update($, archived, all => without(all, back))
+}
+
+// Archives agents: their card leaves the pane for the Archived section, whole and restorable.
+async function archiveAgents($: Parameters<typeof read>[0], ids: string[]) {
+  if (!ids.length) return
+  const t = await $.clock.now()
+  const list = await read($, agents)
+  await closeSettings($, ids, [...new Set(list.filter(a => ids.includes(a.id)).map(groupKey))])
+  await update($, archived, all => ({
+    // Entries whose rows are gone since (capped or cleared) go with this write.
+    ...Object.fromEntries(Object.entries(all).filter(([id]) => list.some(a => a.id === id))),
+    ...Object.fromEntries(ids.map(id => [id, t])),
+  }))
+}
+
+// Removes agents from the monitor for good: their rows, activity and all the pane kept about
+// them. Their work itself is untouched. A group left with no agents starts afresh if one joins.
+async function removeAgents($: Parameters<typeof read>[0], ids: string[]) {
+  if (!ids.length) return
+  const gone = new Set(ids)
+  for (const id of ids) {
+    pauseRequested.delete(id)
+    stopRequested.delete(id)
+    stoppers.delete(id)
+    wake(id)
+  }
+  const groups = [...new Set((await read($, agents)).filter(a => gone.has(a.id)).map(groupKey))]
+  if (gone.has((await read($, inspecting)) ?? '')) await update($, inspecting, () => null)
+  const list = await update($, agents, all => all.filter(a => !gone.has(a.id)))
+  const drop = <V,>(all: Record<string, V>) => without(all, gone)
+  await update($, logs, drop)
+  await update($, agentOverrides, drop)
+  await update($, controls, drop)
+  await update($, held, drop)
+  const arch = await update($, archived, drop)
+  // A group's panel closes only once its card has left the board (plain subagents can have a
+  // card on it and older ones under Archived at once).
+  await closeSettings($, ids, groups.filter(g => !list.some(a => groupKey(a) === g && !arch[a.id])))
+  const emptied = new Set(groups.filter(g => !list.some(a => groupKey(a) === g)))
+  if (emptied.size) {
+    await update($, idle, all => without(all, emptied))
+    await update($, collapsed, all => without(all, emptied))
+    // Its model and effort too: with no card left to show them, they'd apply unseen.
+    await update($, groupOverrides, all => without(all, emptied))
+  }
+  for (const g of emptied) foldedNow.delete(g)
+}
+
 // Which cards the person last saw folded, by group key, as the pane drew them.
 const foldedNow = new Map<string, boolean>()
 
@@ -286,8 +353,20 @@ async function perform($: Parameters<typeof read>[0], key: string, value?: strin
   // asked for stands: a later Pause or Resume leaves it be.
   const stoppable = (id: string) => agent(id)?.status === 'running' && ctl[id] !== 'stop'
   const control = async (ids: string[], v: Control | null) => { if (ids.length) await setControl($, ids, v) }
+  // A group's agents on its card, and those under Archived. A card closes once none of it runs.
+  const arch = await read($, archived)
+  const onCard = (g: string) => list.filter(a => groupKey(a) === g && !arch[a.id])
+  const stored = (g: string) => list.filter(a => groupKey(a) === g && arch[a.id]).map(a => a.id)
+  const closable = (g: string) => onCard(g).every(a => a.status !== 'running') ? onCard(g).map(a => a.id) : []
 
-  if (key.startsWith('fold-')) await update($, collapsed, all => ({ ...all, [rest('fold-')]: !(foldedNow.get(rest('fold-')) ?? false) }))
+  if (key === 'archived-toggle') await update($, archiveOpen, v => !v)
+  else if (key === 'purge-archived') await removeAgents($, list.filter(a => arch[a.id]).map(a => a.id))
+  else if (key.startsWith('close-')) await archiveAgents($, closable(rest('close-')))
+  else if (key.startsWith('archive-')) await archiveAgents($, closable(rest('archive-')))
+  else if (key.startsWith('remove-')) await removeAgents($, closable(rest('remove-')))
+  else if (key.startsWith('restore-')) await restoreAgents($, stored(rest('restore-')))
+  else if (key.startsWith('purge-')) await removeAgents($, stored(rest('purge-')))
+  else if (key.startsWith('fold-'))await update($, collapsed, all => ({ ...all, [rest('fold-')]: !(foldedNow.get(rest('fold-')) ?? false) }))
   else if (key.startsWith('gear-group-')) await toggleEditor(`group:${rest('gear-group-')}`)
   else if (key.startsWith('gear-')) agent(rest('gear-'))?.status === 'running' ? await toggleEditor(`agent:${rest('gear-')}`) : await inspect(rest('gear-'))
   else if (key.startsWith('pause-all-')) {
@@ -352,6 +431,22 @@ function demoSeed(t: number): { rows: AgentRow[]; logs: Record<string, LogEntry[
 
 // One second of the demo, written only when something changed, as real agents are: Pause and
 // Stop land at once, and every other second one working agent finishes a model step.
+// Takes the demo away: its rows as Remove does, then anything else keyed by a demo id (a tick
+// that read the demo just before its rows went may still have written some).
+async function clearDemo($: Parameters<typeof read>[0]) {
+  await removeAgents($, (await read($, agents)).filter(a => a.id.startsWith(DEMO)).map(a => a.id))
+  const ids = [
+    ...pauseRequested, ...stopRequested,
+    ...Object.keys(await read($, logs)), ...Object.keys(await read($, controls)), ...Object.keys(await read($, held)),
+  ]
+  const demo = new Set(ids.filter(id => id.startsWith(DEMO)))
+  if (!demo.size) return
+  for (const id of demo) { pauseRequested.delete(id); stopRequested.delete(id); wake(id) }
+  await update($, logs, all => without(all, demo))
+  await update($, controls, all => without(all, demo))
+  await update($, held, all => without(all, demo))
+}
+
 async function demoTick($: Parameters<typeof read>[0], t: number) {
   const ctl = await read($, controls)
   const holding = await read($, held)
@@ -371,6 +466,7 @@ async function demoTick($: Parameters<typeof read>[0], t: number) {
   }
   if (!stopped.length && !stepper) return
 
+  if (stopped.length) await closeSettings($, stopped)
   await update($, agents, list => list.map(a => {
     if (stopped.includes(a.id)) return { ...a, status: 'stopped' as const, endedAt: t }
     if (a.id !== stepper?.id) return a
@@ -426,22 +522,23 @@ export const register: Register = on => {
   on('command.run', { command: 'workflows' }, async ($, e) => {
     const arg = e.args.trim()
     if (arg === 'clear') {
-      await update($, agents, list => list.filter(a => a.status === 'running' && !a.id.startsWith(DEMO)))
-      await update($, logs, all => Object.fromEntries(Object.entries(all).filter(([id]) => !id.startsWith(DEMO))))
-      return { text: 'Cleared finished and demo agents from the workflow monitor.' }
+      await removeAgents($, (await read($, agents)).filter(a => a.status !== 'running').map(a => a.id))
+      await clearDemo($)
+      return { text: 'Cleared finished, archived and demo agents from the workflow monitor.' }
     }
     if (arg === 'demo') {
       const t = await $.clock.now()
       const seed = demoSeed(t)
+      // A fresh demo: whatever is left of the last one (rows, pauses, archive) goes first.
+      await clearDemo($)
       await update($, workflows, all => ({
         ...all,
         toolu_demo: { name: 'checkout-redesign', description: 'Investigate the checkout flow, design the fixes, and review them (demo data).', phases: ['Investigate', 'Design', 'Review'] },
       }))
-      await update($, agents, list => [...list.filter(a => !a.id.startsWith(DEMO)), ...seed.rows])
+      await update($, agents, list => [...list, ...seed.rows])
       await update($, logs, all => ({ ...all, ...seed.logs }))
-      await update($, controls, all => ({ ...Object.fromEntries(Object.entries(all).filter(([id]) => !id.startsWith(DEMO))), [`${DEMO}6`]: 'pause' as const }))
+      await update($, controls, all => ({ ...all, [`${DEMO}6`]: 'pause' as const }))
       await update($, held, all => ({ ...all, [`${DEMO}6`]: true }))
-      for (const s of [pauseRequested, stopRequested]) for (const id of s) if (id.startsWith(DEMO)) s.delete(id)
       pauseRequested.add(`${DEMO}6`)
       await update($, idle, ({ wf_demo: _, [SUBAGENTS]: __, ...rest }) => rest)
       await $.ui.open({ id: PANE, title: TITLE })
@@ -491,6 +588,9 @@ export const register: Register = on => {
     }
     const before = await read($, agents)
     const list = await update($, agents, all => [...all.filter(a => a.id !== row.id), row].slice(-MAX_ROWS))
+    // A workflow archived between its phases comes back whole when its next agent starts; an
+    // agent started again under its old id comes back too.
+    await restoreAgents($, row.runId ? list.filter(a => a.runId === row.runId).map(a => a.id) : [row.id])
     await syncIdle($, list, await read($, controls))
     if (!before.some(a => a.status === 'running')) void $.ui.open({ id: PANE, title: TITLE })
 
@@ -523,9 +623,11 @@ export const register: Register = on => {
       return { turnId: e.turnId, index: e.index, answer: STOP_TEXT, toolUses: [], stopReason: 'end_turn', usage: null }
     }
 
+    // An agent the monitor doesn't list (started before it loaded, or removed from it) is left be.
     const row = (await read($, agents)).find(a => a.id === id)
+    if (!row) return yield* next(e)
     const own = (await read($, agentOverrides))[id] ?? {}
-    const group = row ? (await read($, groupOverrides))[groupKey(row)] ?? {} : {}
+    const group = (await read($, groupOverrides))[groupKey(row)] ?? {}
     const model = own.model ?? group.model
     const effort = own.effort ?? group.effort
     const sent = { ...e, ...(model ? { model } : {}), ...(effort ? { effort: effort as typeof e.effort } : {}) }
@@ -533,7 +635,7 @@ export const register: Register = on => {
     // Written only when it changes: every write redraws the pane.
     const shown = (a: AgentRow): AgentRow =>
       ({ ...a, model: sent.model || a.model, effort: sent.effort === undefined ? a.effort : String(sent.effort), isOverridden: a.isOverridden || !!(model || effort) })
-    if (row && JSON.stringify(shown(row)) !== JSON.stringify(row)) {
+    if (JSON.stringify(shown(row)) !== JSON.stringify(row)) {
       await update($, agents, list => list.map(a => (a.id === id ? shown(a) : a)))
     }
     // Pass the stream through untouched, keeping a copy of it for the Inspect pane.
@@ -598,6 +700,7 @@ export const register: Register = on => {
       stopRequested.delete(id)
       stoppers.delete(id)
       wake(id)
+      await closeSettings($, [id])
       const ctl = await update($, controls, ({ [id]: _, ...rest }) => rest)
       const list = await update($, agents, all =>
         all.map(a => {
@@ -626,6 +729,9 @@ export const register: Register = on => {
     const folded = await read($, collapsed)
     const ctl = await read($, controls)
     const holding = await read($, held)
+    const arch = await read($, archived)
+    const archOpen = await read($, archiveOpen)
+    const idleBy = await read($, idle)
     const tick = Math.max(await $.clock.now(), ...list.map(a => a.endedAt ?? a.startedAt), 0)
     const width = e.props.bodyColumns ?? e.viewport?.columns ?? 100
     // Wide: every column. Medium: no effort/cost columns. Narrow: each agent on two lines.
@@ -642,15 +748,22 @@ export const register: Register = on => {
     }
 
     // Group by workflow run; plain subagents share one group. Running groups first, then newest.
-    const byGroup = new Map<string, AgentRow[]>()
-    for (const a of list) byGroup.set(groupKey(a), [...(byGroup.get(groupKey(a)) ?? []), a])
-    const ordered = [...byGroup.entries()].sort(([, a], [, b]) => {
+    // Archived agents leave their cards for the Archived section at the end.
+    const grouped = (rows: AgentRow[]) => {
+      const byGroup = new Map<string, AgentRow[]>()
+      for (const a of rows) byGroup.set(groupKey(a), [...(byGroup.get(groupKey(a)) ?? []), a])
+      return byGroup
+    }
+    const shown = list.filter(a => !arch[a.id])
+    const ordered = [...grouped(shown).entries()].sort(([, a], [, b]) => {
       const live = (rows: AgentRow[]) => (rows.some(r => r.status === 'running') ? 1 : 0)
       return live(b) - live(a) || Math.max(...b.map(r => r.startedAt)) - Math.max(...a.map(r => r.startedAt))
     })
-    const anyLive = list.some(a => a.status === 'running')
+    // Most recently archived first.
+    const shelf = [...grouped(list.filter(a => arch[a.id])).entries()]
+      .sort(([, a], [, b]) => Math.max(...b.map(r => arch[r.id] ?? 0)) - Math.max(...a.map(r => arch[r.id] ?? 0)))
+    const anyLive = shown.some(a => a.status === 'running')
 
-    const idleBy = await read($, idle)
     // Time an agent spent working: frozen from a pause or stop, with earlier pauses left out.
     const worked = (r: AgentRow) => (r.pausedSince ?? r.endedAt ?? tick) - r.startedAt - (r.pausedTotal ?? 0)
     const working = (r: AgentRow) => isWorking(r, ctl)
@@ -709,14 +822,14 @@ export const register: Register = on => {
 
     // The panel under a row or a card header: controls first, then the model and effort pickers.
     const editor = (id: string, current: Override, note: string, actions: ControlItem[] = []) => (
-      <Box key={`ed-${id}`} flexDirection="column" marginTop={1} paddingX={1} borderStyle="round" borderDimColor>
+      <Box key={`ed-${id}`} flexDirection="column" marginY={1} paddingX={1} borderStyle="round" borderDimColor>
         {actions.length > 0 && <Box marginBottom={1}>{controlsRow(actions)}</Box>}
         {controlsRow([
           picker(`model-${id}`, 'Model', current.model ?? 'inherit', MODEL_OPTIONS),
           picker(`effort-${id}`, 'Effort', current.effort ?? 'inherit', EFFORT_OPTIONS),
           button(`done-${id}`, 'Done'),
         ], 2)}
-        <Text color="inactive" italic>{note}</Text>
+        <Box marginTop={1}><Text color="inactive" italic>{note}</Text></Box>
       </Box>
     )
 
@@ -831,10 +944,17 @@ export const register: Register = on => {
       const hasGroupOverride = !!(go.model || go.effort)
       const running = rows.filter(r => r.status === 'running')
       const anyPaused = running.some(r => ctl[r.id] === 'pause')
-      const groupActions = running.length === 0 ? [] : [
-        button(`pause-all-${key}`, anyPaused ? '▶ Resume all' : '⏸ Pause all'),
-        button(`stop-all-${key}`, '■ Stop all'),
-      ]
+      // Running: pause or stop them all. Finished: archive the card (restorable) or remove it.
+      const groupActions = running.length > 0
+        ? [button(`pause-all-${key}`, anyPaused ? '▶ Resume all' : '⏸ Pause all'), button(`stop-all-${key}`, '■ Stop all')]
+        : [button(`archive-${key}`, '⊟ Archive'), button(`remove-${key}`, 'Remove')]
+      const groupNote = running.length > 0
+        ? isWorkflow
+          ? 'Applies to every agent in this workflow from its next request, including agents not started yet. A per-agent setting wins.'
+          : 'Applies to every subagent in this group from its next request. A per-agent setting wins.'
+        : isWorkflow
+          ? 'Archive (or ✕ on the card) moves it under Archived, where it can be restored; Remove deletes it from the monitor. Model and effort apply to agents it starts later.'
+          : 'Archive (or ✕ on the card) moves them under Archived, where they can be restored; Remove deletes them from the monitor. Model and effort apply to subagents started later.'
 
       // Phases from the label prefix; agents without one go under "Agents".
       const phases = new Map<string, AgentRow[]>()
@@ -857,6 +977,7 @@ export const register: Register = on => {
             <Box flexDirection="row" gap={1} flexShrink={0}>
               {live > 0 ? <Text color={RUNNING}>● {live}{layout === 'narrow' ? '' : ' running'}</Text> : failed > 0 ? <Text color="error">✗ {failed}{layout === 'narrow' ? '' : ' failed'}</Text> : <Text color="success">✓{layout === 'narrow' ? '' : ' done'}</Text>}
               {control(button(`gear-group-${key}`, groupOpen ? '▴' : hasGroupOverride ? '◆' : '⚙', { plain: true }))}
+              {live === 0 && control(button(`close-${key}`, '✕', { plain: true }))}
             </Box>
           </Box>
           <Box flexDirection="row" flexWrap="wrap" columnGap={3}>
@@ -869,14 +990,7 @@ export const register: Register = on => {
             <Text color="error">{money(sumCost(rows))}</Text>
           </Box>
           {!isFolded && meta?.description && <Text dimColor wrap="wrap">{meta.description}</Text>}
-          {groupOpen && editor(
-            `group-${key}`,
-            go,
-            isWorkflow
-              ? 'Applies to every agent in this workflow from its next request, including agents not started yet. A per-agent setting wins.'
-              : 'Applies to every subagent in this group from its next request. A per-agent setting wins.',
-            groupActions,
-          )}
+          {groupOpen && editor(`group-${key}`, go, groupNote, groupActions)}
           {!isFolded && phaseOrder.map(p => {
             const prs = phases.get(p)!
             const done = prs.filter(r => r.status !== 'running').length
@@ -896,7 +1010,38 @@ export const register: Register = on => {
       )
     })
 
-    return <Box flexDirection="column">{cards}</Box>
+    // Archived cards, folded into one line until unfolded: each can come back or go for good.
+    const archive = shelf.length > 0 && (
+      <Box key="archived" flexDirection="column" paddingX={1}>
+        <Box flexDirection="row" justifyContent="space-between" gap={1}>
+          <Box flexShrink={1} minWidth={0}>
+            {control(button('archived-toggle', `Archived (${shelf.length})`, { plain: true, prefix: archOpen ? '▾ ' : '▸ ' }))}
+          </Box>
+          {archOpen && <Box flexShrink={0}>{control(button('purge-archived', 'Remove all', { plain: true }))}</Box>}
+        </Box>
+        {archOpen && shelf.map(([key, rows]) => (
+          <Box key={`arch-${key}`} flexDirection="row" justifyContent="space-between" gap={1} marginTop={1}>
+            <Box flexDirection="column" flexShrink={1} minWidth={0}>
+              <Text wrap="truncate-end" dimColor>{key !== SUBAGENTS ? metas[rows[0]?.toolUseId ?? '']?.name ?? key : 'Subagents'}</Text>
+              <Text wrap="truncate-end" color="inactive">
+                {rows.length} {rows.length === 1 ? 'agent' : 'agents'} · {tokens(sumTokens(rows))} tokens · {money(sumCost(rows))}
+              </Text>
+            </Box>
+            <Box flexShrink={0}>{controlsRow([button(`restore-${key}`, 'Restore'), button(`purge-${key}`, 'Remove')])}</Box>
+          </Box>
+        ))}
+      </Box>
+    )
+
+    return (
+      <Box flexDirection="column">
+        {cards}
+        {ordered.length === 0 && (
+          <Box paddingX={1} marginBottom={1}><Text dimColor>Nothing on the board: everything is archived.</Text></Box>
+        )}
+        {archive}
+      </Box>
+    )
   })
 
   // One agent's live activity: thinking, text and tool calls as they stream.
@@ -914,6 +1059,20 @@ export const register: Register = on => {
     // Kept as in the Workflows pane: the log redraws this pane at every few chunks it streams.
     const keep = keeper(`${e.surface}:${INSPECT}`)
     const control = (key: string, label: string) => keep(key, <Button key={key} label={label} onPress={byHook} />)
+    // A line led by a small dot in a cell of its own, so the dots stand in one column, centred on
+    // the line. Desktop draws the dot (a font's ● sits off its line and runs into the text).
+    const dot = e.surface === 'desktop'
+      ? (() => {
+          const { Svg } = $.ui.resolve(e)
+          return <Svg source={`<svg xmlns="http://www.w3.org/2000/svg" width="6" height="6" viewBox="0 0 6 6"><circle cx="3" cy="3" r="3" fill="${RUNNING}"/></svg>`} alt="activity" width={6} height={6} />
+        })()
+      : <Text color={RUNNING}>●</Text>
+    const dotted = (key: string, line: unknown) => (
+      <Box key={key} flexDirection="row" gap={1} alignItems="center">
+        <Box width={1} flexShrink={0} justifyContent="center" alignItems="center">{dot}</Box>
+        <Box flexGrow={1} flexShrink={1} minWidth={0}>{line}</Box>
+      </Box>
+    )
 
     return (
       <Box flexDirection="column" paddingX={1}>
@@ -931,11 +1090,11 @@ export const register: Register = on => {
           {entries.length === 0 && <Text dimColor>Nothing yet: activity shows here from the agent's next model request.</Text>}
           {entries.map((x, i) =>
             x.kind === 'thinking' ? <Text key={`l-${i}`} color="inactive" italic wrap="wrap">{x.text.trim()}</Text>
-            : x.kind === 'tool' ? <Text key={`l-${i}`} wrap="truncate-end"><Text color={RUNNING}>⏺ </Text><Text bold>{x.tool}</Text><Text dimColor>  {x.text}</Text></Text>
+            : x.kind === 'tool' ? dotted(`l-${i}`, <Text wrap="truncate-end"><Text bold>{x.tool}</Text><Text dimColor>  {x.text}</Text></Text>)
             : x.kind === 'note' ? <Text key={`l-${i}`} color="warning">{x.text}</Text>
             : <Text key={`l-${i}`} wrap="wrap">{x.text.trim()}</Text>,
           )}
-          {r.status === 'running' && ctl !== 'pause' && <Text color={RUNNING}>● working…</Text>}
+          {r.status === 'running' && ctl !== 'pause' && dotted('working', <Text color={RUNNING}>working…</Text>)}
         </Box>
       </Box>
     )
