@@ -35,6 +35,17 @@ export type WorkflowMeta = {
   phases: string[]
 }
 
+/** One line of an agent's live activity, as the Inspect pane shows it. */
+export type LogEntry = {
+  kind: 'text' | 'thinking' | 'tool' | 'note'
+  text: string
+  /** A tool call's name; its arguments summary is `text`. */
+  tool?: string
+}
+
+/** What the person asked of a running agent from the pane. */
+export type Control = 'pause' | 'stop'
+
 /** A model or effort the pane forces on a subagent's next requests. */
 export type Override = {
   model?: string
@@ -56,6 +67,14 @@ declare module 'claude-code' {
       editing: string | null
       /** Groups the person folded or unfolded, by group key. */
       collapsed: Record<string, boolean>
+      /** Pause or stop asked of a running agent, by agent id. */
+      controls: Record<string, Control>
+      /** Agents a pause is holding right now, before their next model request. */
+      held: Record<string, boolean>
+      /** The latest activity of each agent, by agent id, capped. */
+      logs: Record<string, LogEntry[]>
+      /** The agent the Inspect pane shows. */
+      inspecting: string | null
     }
   }
 }
