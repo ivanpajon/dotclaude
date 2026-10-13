@@ -1,0 +1,10 @@
+{
+  "name": "workflow-budget",
+  "version": "1.0.0",
+  "description": "Caps multi-agent workflow size (40 agents by default), asks before going bigger, and uses cheaper verification patterns.",
+  "author": { "name": "Ivan Pajon", "url": "https://github.com/ivanpajon" },
+  "repository": "https://github.com/ivanpajon/dotclaude",
+  "license": "MIT",
+  "keywords": ["workflows", "subagents", "ultracode", "cost"],
+  "skills": ["./"]
+}

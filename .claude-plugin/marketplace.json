@@ -1,0 +1,15 @@
+{
+  "name": "dotclaude",
+  "description": "Ivan Pajon's Claude Code customizations: skills, agents, hooks, MCP servers, mods and plugins.",
+  "owner": { "name": "Ivan Pajon", "url": "https://github.com/ivanpajon" },
+  "plugins": [
+    {
+      "name": "workflow-budget",
+      "source": "./skills/workflow-budget",
+      "description": "Caps multi-agent workflow size (40 agents by default), asks before going bigger, and uses cheaper verification patterns.",
+      "version": "1.0.0",
+      "category": "productivity",
+      "tags": ["skill", "workflows", "subagents", "ultracode", "cost"]
+    }
+  ]
+}

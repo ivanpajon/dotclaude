@@ -1,0 +1,43 @@
+# --- Secrets: never commit ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+.credentials.json
+credentials*.json
+
+# --- Personal Claude Code state (if anything from ~/.claude ends up here) ---
+settings.local.json
+.claude/settings.local.json
+projects/
+memory/
+todos/
+shell-snapshots/
+statsig/
+history.jsonl
+*.jsonl
+
+# --- Skill-creator eval workspaces ---
+*-workspace/
+
+# --- Build output and dependencies (MCP servers, mods) ---
+node_modules/
+dist/
+build/
+*.mcpb
+*.dxt
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
