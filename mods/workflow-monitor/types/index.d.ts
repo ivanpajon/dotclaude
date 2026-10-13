@@ -26,6 +26,10 @@ export type AgentRow = {
   endedAt?: number
   steps: number
   usage: AgentUsage
+  /** When its counter froze (paused or stopped from the pane); absent while it counts. */
+  pausedSince?: number
+  /** Time spent paused and since resumed, left out of its elapsed time. */
+  pausedTotal?: number
 }
 
 /** What the Workflow tool call's script said about itself (`export const meta`). */
@@ -46,6 +50,17 @@ export type LogEntry = {
 /** What the person asked of a running agent from the pane. */
 export type Control = 'pause' | 'stop'
 
+/** One Button or Select a pane draws; a press or pick runs it by `key` (and the picked `value`). */
+export type ControlItem =
+  | { kind: 'button'; key: string; label: string; plain?: boolean; prefix?: string; bold?: boolean }
+  | { kind: 'select'; key: string; label: string; value: string; options: { value: string; label: string }[] }
+
+/** A group's time with none of its agents working: since when (while it lasts) and in total before that. */
+export type Idle = {
+  since?: number
+  total: number
+}
+
 /** A model or effort the pane forces on a subagent's next requests. */
 export type Override = {
   model?: string
@@ -56,7 +71,6 @@ declare module 'claude-code' {
   interface PluginState {
     'workflow-monitor': {
       agents: AgentRow[]
-      now: number
       /** Keyed by the Workflow tool call's tool_use_id. */
       workflows: Record<string, WorkflowMeta>
       /** Keyed by agent id. */
@@ -65,6 +79,8 @@ declare module 'claude-code' {
       groupOverrides: Record<string, Override>
       /** Which editor is open: `agent:<id>`, `group:<key>`, or none. */
       editing: string | null
+      /** Time each group (by group key) spent with no agent working, left out of its counter. */
+      idle: Record<string, Idle>
       /** Groups the person folded or unfolded, by group key. */
       collapsed: Record<string, boolean>
       /** Pause or stop asked of a running agent, by agent id. */
