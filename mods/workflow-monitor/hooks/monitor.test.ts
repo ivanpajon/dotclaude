@@ -127,7 +127,7 @@ test('tracks a workflow agent, applies overrides, and pauses, stops and inspects
   // Its settings panel, open until now, closes once it finishes.
   expect(await pane.find({ key: 'model-agent-2' })).toBeTruthy()
   await $.turn.complete({ answer: 'stopped', durationMs: 1000, isAborted: false, turnId: 't-agent-2', agentId: 'agent-2', reason: 'answer' })
-  expect(await pane.find({ text: '■' })).toBeTruthy()
+  expect(await pane.find({ text: '⏹' })).toBeTruthy()
   expect(await pane.find({ key: 'model-agent-2' })).toBeFalsy()
 
   // Stop cuts a reply that is still streaming, without waiting for it to end.
@@ -150,7 +150,11 @@ test('/workflows demo loads sample agents that honour Stop', async ($, on) => {
   const props = { title: 'Workflows', isFocused: false, bodyColumns: 110 }
   const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor', props, viewport: { columns: 110, rows: 60 } })
   expect(await pane.find({ text: 'checkout-redesign' })).toBeTruthy()
-  expect(await pane.find({ text: /paused/ })).toBeTruthy()
+  // A stopped row shows the stop icon in grey, apart from the amber of paused; a paused row says so by its icon alone.
+  expect((await pane.findAll({ text: '⏹' })).some(x => x.type === 'Text' && x.props.color === '#8C929C')).toBe(true)
+  expect(JSON.stringify(await pane.drawn())).not.toContain('"alt":"stopped"')
+  expect(await pane.find({ text: /⏸/ })).toBeTruthy()
+  expect(await pane.find({ text: /· paused/ })).toBeFalsy()
   await pane.press({ key: 'gear-demo-4' })
   await pane.press({ key: 'stop-demo-4' })
   await pane.unmount()
@@ -548,7 +552,7 @@ test('/workflows clear and a fresh /workflows demo leave nothing of the old behi
   await $.command.run({ command: 'workflows', args: 'demo' })
   expect(await pane.findAll({ key: 'fold-wf_demo' })).toHaveLength(1)
   expect(await pane.find({ text: /stopping…/ })).toBeFalsy()
-  expect(await pane.find({ text: /paused/ })).toBeTruthy()
+  expect(await pane.find({ text: /⏸/ })).toBeTruthy()
   const call = await $.tool.call({ tool: 'Read', tool_use_id: 'toolu_d4', input: { file_path: 'a' }, agentId: 'demo-4' })
   expect('deny' in call).toBe(false)
 
@@ -557,6 +561,6 @@ test('/workflows clear and a fresh /workflows demo leave nothing of the old behi
   expect(await has('archived-toggle')).toBe(false)
   expect(await has('fold-wf_demo')).toBe(false)
   expect(await has('fold-wf_live')).toBe(true)
-  expect(await pane.find({ text: /paused/ })).toBeFalsy()
+  expect(await pane.find({ text: /⏸/ })).toBeFalsy()
   await pane.unmount()
 })

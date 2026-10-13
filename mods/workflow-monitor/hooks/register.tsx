@@ -60,14 +60,17 @@ const EFFORT_OPTIONS = [
 
 const ZERO: AgentUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 
-// Running is blue, apart from the amber of paused and stopped, as in Claude Code's own workflow view.
+// Running is blue, as in Claude Code's own workflow view. Paused is amber; stopped is a neutral
+// grey, apart from both paused and failed: ended on purpose, not gone wrong.
 const RUNNING = '#4D9DF0'
+const STOPPED = '#8C929C'
+const PAUSED = '#E5A50A'
 
 const GLYPH: Record<AgentStatus, [string, string]> = {
   running: ['●', RUNNING],
   done: ['✓', 'success'],
   failed: ['✗', 'error'],
-  stopped: ['■', 'warning'],
+  stopped: ['⏹', STOPPED],
 }
 
 // The same status colors as raw hex, for SVG (theme keys don't reach inside it).
@@ -75,7 +78,14 @@ const HEX: Record<AgentStatus, string> = {
   running: RUNNING,
   done: '#4EBA65',
   failed: '#E5484D',
-  stopped: '#E5A50A',
+  stopped: STOPPED,
+}
+
+// An agent's icon and colour. One asked to pause or stop shows it while it still runs.
+function look(r: AgentRow, c: Control | undefined): [string, string] {
+  if (r.status === 'running' && c === 'pause') return ['⏸', 'warning']
+  if (r.status === 'running' && c === 'stop') return ['⏹', STOPPED]
+  return GLYPH[r.status]
 }
 
 // Column widths, shared by the header row and every agent row so they line up.
@@ -768,14 +778,9 @@ export const register: Register = on => {
     const worked = (r: AgentRow) => (r.pausedSince ?? r.endedAt ?? tick) - r.startedAt - (r.pausedTotal ?? 0)
     const working = (r: AgentRow) => isWorking(r, ctl)
 
-    // The row's status icon. On desktop a stop square is drawn rounded, like the progress squares; a font's ■ can't be.
-    const icon = (glyph: string, color: string) => {
-      if (glyph !== '■' || e.surface !== 'desktop') return <Text color={color}>{glyph}</Text>
-      const { Svg } = $.ui.resolve(e)
-      return <Svg source={`<svg xmlns="http://www.w3.org/2000/svg" width="7" height="7" viewBox="0 0 7 7"><rect width="7" height="7" rx="2" fill="${HEX.stopped}"/></svg>`} alt="stopped" width={7} height={7} />
-    }
-    // A square's color: amber while paused, like the row's icon.
-    const squareHex = (r: AgentRow) => (r.status === 'running' && ctl[r.id] ? HEX.stopped : HEX[r.status])
+    // A square's color: as the row's icon (see look), amber while paused, grey while stopping.
+    const squareHex = (r: AgentRow) =>
+      r.status === 'running' && ctl[r.id] ? (ctl[r.id] === 'pause' ? PAUSED : STOPPED) : HEX[r.status]
 
     // An elapsed time: it counts up by itself where the surface runs `Client` regions, so no redraw is needed.
     const timer = (key: string, ms: number, rate: number) =>
@@ -786,7 +791,7 @@ export const register: Register = on => {
     const cell = (w: number, child: unknown, right = false) => (
       <Box width={w} flexShrink={0} justifyContent={right ? 'flex-end' : 'flex-start'}>{child}</Box>
     )
-    // Status icons differ in width (✓ ✗ ⏸ ● and the drawn square): centred, they line up in one column.
+    // Status icons differ in width (✓ ✗ ⏸ ⏹ ●): centred, they line up in one column.
     const glyphCell = (child: unknown) => (
       <Box width={W.glyph} flexShrink={0} justifyContent="center" alignItems="center">{child}</Box>
     )
@@ -836,15 +841,15 @@ export const register: Register = on => {
     const agentRow = (r: AgentRow) => {
       const paused = r.status === 'running' && ctl[r.id] === 'pause'
       const stopping = r.status === 'running' && ctl[r.id] === 'stop'
-      const [glyph, color] = paused ? ['⏸', 'warning'] : stopping ? ['■', 'warning'] : GLYPH[r.status]
+      const [glyph, color] = look(r, ctl[r.id])
       const isOpen = open === `agent:${r.id}`
       const hasOverride = !!(own[r.id]?.model || own[r.id]?.effort)
       const accent = r.isOverridden ? 'merged' : undefined
       // Running: the settings gear. Finished: straight to its activity (perform() tells them apart).
       const gear = control(button(`gear-${r.id}`, r.status !== 'running' ? '›' : isOpen ? '▴' : hasOverride ? '◆' : '⚙', { plain: true }))
-      // Why a running agent isn't moving, after its label.
-      const state = paused ? (holding[r.id] ? ' · paused' : ' · pausing…') : stopping ? ' · stopping…' : ''
-      const label = <Text wrap="truncate-end" dimColor={r.status !== 'running'}>{r.label}<Text color="warning">{state}</Text></Text>
+      // The icon says paused or stopped; after the label, only that it's still on its way there.
+      const state = paused ? (holding[r.id] ? '' : ' · pausing…') : stopping ? ' · stopping…' : ''
+      const label = <Text wrap="truncate-end" dimColor={r.status !== 'running'}>{r.label}<Text color={color}>{state}</Text></Text>
       const time = timer(`time-${r.id}`, worked(r), working(r) ? 1 : 0)
       // Pause and Stop while it runs (a panel left open when it finishes keeps only Inspect).
       const settings = isOpen && editor(
@@ -854,7 +859,7 @@ export const register: Register = on => {
         [
           ...(r.status === 'running' ? [
             button(`pause-${r.id}`, paused ? '▶ Resume' : '⏸ Pause'),
-            button(`stop-${r.id}`, stopping ? '■ Stopping…' : '■ Stop'),
+            button(`stop-${r.id}`, stopping ? '⏹ Stopping…' : '⏹ Stop'),
           ] : []),
           button(`activity-${r.id}`, '◉ Inspect'),
         ],
@@ -864,7 +869,7 @@ export const register: Register = on => {
         return [
           <Box key={r.id} flexDirection="column">
             <Box flexDirection="row" gap={1}>
-              {glyphCell(icon(glyph, color))}
+              {glyphCell(<Text color={color}>{glyph}</Text>)}
               <Box flexGrow={1} flexShrink={1} minWidth={0}>
                 {label}
               </Box>
@@ -884,7 +889,7 @@ export const register: Register = on => {
 
       return [
         <Box key={r.id} flexDirection="row" gap={1}>
-          {glyphCell(icon(glyph, color))}
+          {glyphCell(<Text color={color}>{glyph}</Text>)}
           <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
             {label}
           </Box>
@@ -922,7 +927,7 @@ export const register: Register = on => {
           </Box>
         )
       }
-      return <Text key={`bar-${key}`}>{rows.map(r => <Text color={r.status === 'running' && ctl[r.id] ? 'warning' : GLYPH[r.status][1]}>■</Text>)}</Text>
+      return <Text key={`bar-${key}`}>{rows.map(r => <Text color={look(r, ctl[r.id])[1]}>■</Text>)}</Text>
     }
 
     const cards = ordered.map(([key, rows]) => {
@@ -946,7 +951,7 @@ export const register: Register = on => {
       const anyPaused = running.some(r => ctl[r.id] === 'pause')
       // Running: pause or stop them all. Finished: archive the card (restorable) or remove it.
       const groupActions = running.length > 0
-        ? [button(`pause-all-${key}`, anyPaused ? '▶ Resume all' : '⏸ Pause all'), button(`stop-all-${key}`, '■ Stop all')]
+        ? [button(`pause-all-${key}`, anyPaused ? '▶ Resume all' : '⏸ Pause all'), button(`stop-all-${key}`, '⏹ Stop all')]
         : [button(`archive-${key}`, '⊟ Archive'), button(`remove-${key}`, 'Remove')]
       const groupNote = running.length > 0
         ? isWorkflow
@@ -1054,7 +1059,7 @@ export const register: Register = on => {
     }
     const ctl = (await read($, controls))[id]
     const entries = ((await read($, logs))[id] ?? []).slice(-80)
-    const [glyph, color] = r.status === 'running' && ctl === 'pause' ? ['⏸', 'warning'] : GLYPH[r.status]
+    const [glyph, color] = look(r, ctl)
     const status = r.status === 'running' ? (ctl === 'pause' ? 'paused' : ctl === 'stop' ? 'stopping' : 'running') : r.status
     // Kept as in the Workflows pane: the log redraws this pane at every few chunks it streams.
     const keep = keeper(`${e.surface}:${INSPECT}`)
@@ -1083,7 +1088,7 @@ export const register: Register = on => {
         {r.status === 'running' && (
           <Box flexDirection="row" gap={1} marginTop={1}>
             {control(`pause-${id}`, ctl === 'pause' ? '▶ Resume' : '⏸ Pause')}
-            {control(`stop-${id}`, ctl === 'stop' ? '■ Stopping…' : '■ Stop')}
+            {control(`stop-${id}`, ctl === 'stop' ? '⏹ Stopping…' : '⏹ Stop')}
           </Box>
         )}
         <Box flexDirection="column" marginTop={1} gap={1}>
@@ -1091,7 +1096,7 @@ export const register: Register = on => {
           {entries.map((x, i) =>
             x.kind === 'thinking' ? <Text key={`l-${i}`} color="inactive" italic wrap="wrap">{x.text.trim()}</Text>
             : x.kind === 'tool' ? dotted(`l-${i}`, <Text wrap="truncate-end"><Text bold>{x.tool}</Text><Text dimColor>  {x.text}</Text></Text>)
-            : x.kind === 'note' ? <Text key={`l-${i}`} color="warning">{x.text}</Text>
+            : x.kind === 'note' ? <Text key={`l-${i}`} color={STOPPED}>{x.text}</Text>
             : <Text key={`l-${i}`} wrap="wrap">{x.text.trim()}</Text>,
           )}
           {r.status === 'running' && ctl !== 'pause' && dotted('working', <Text color={RUNNING}>working…</Text>)}
