@@ -264,7 +264,9 @@ export const register: Register = on => {
     const folded = await read($, collapsed)
     const tick = Math.max(await read($, now), ...list.map(a => a.endedAt ?? a.startedAt), 0)
     const width = e.props.bodyColumns ?? e.viewport?.columns ?? 100
-    const wide = width >= 84
+    // Wide: every column. Medium: no effort/cost columns. Narrow: each agent on two lines.
+    const layout = width >= 84 ? 'wide' : width >= 58 ? 'medium' : 'narrow'
+    const wide = layout === 'wide'
 
     if (list.length === 0) {
       return (
@@ -294,7 +296,7 @@ export const register: Register = on => {
     const columns = (key: string) => (
       <Box key={key} flexDirection="row" gap={1}>
         {cell(W.glyph, <Text> </Text>)}
-        <Box flexGrow={1} flexShrink={1}><Text dimColor>Agent</Text></Box>
+        <Box flexGrow={1} flexShrink={1} minWidth={0}><Text dimColor>Agent</Text></Box>
         {cell(W.model, <Text dimColor>Model</Text>)}
         {wide && cell(W.effort, <Text dimColor>Effort</Text>)}
         {cell(W.tokens, <Text dimColor>Tokens</Text>, true)}
@@ -332,10 +334,43 @@ export const register: Register = on => {
       const [glyph, color] = GLYPH[r.status]
       const isOpen = open === `agent:${r.id}`
       const hasOverride = !!(own[r.id]?.model || own[r.id]?.effort)
+      const accent = r.isOverridden ? 'suggestion' : undefined
+      const gear = r.status === 'running'
+        ? <Button key={`gear-${r.id}`} plain label={isOpen ? '▴' : hasOverride ? '◆' : '⚙'} onPress={edit(`agent:${r.id}`)} />
+        : <Text> </Text>
+      const settings = isOpen && editor(
+        r.id,
+        own[r.id] ?? {},
+        o => update($, agentOverrides, all => ({ ...all, [r.id]: o })),
+        'Applies to this agent from its next model request.',
+      )
+
+      if (layout === 'narrow') {
+        return [
+          <Box key={r.id} flexDirection="column">
+            <Box flexDirection="row" gap={1}>
+              {cell(W.glyph, <Text color={color}>{glyph}</Text>)}
+              <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                <Text wrap="truncate-end" dimColor={r.status !== 'running'}>{r.label}</Text>
+              </Box>
+              {cell(W.gear, gear)}
+            </Box>
+            <Box flexDirection="row" flexWrap="wrap" columnGap={2} marginLeft={W.glyph + 1}>
+              <Text color={accent}>{shortModel(r.model)}</Text>
+              <Text color={accent} dimColor={!accent}>{effortLabel(r.effort)}</Text>
+              <Text>{tokens(totalTokens(r.usage))}<Text dimColor> tok</Text></Text>
+              <Text>{duration((r.endedAt ?? tick) - r.startedAt)}</Text>
+              <Text dimColor>{money(costOf(r.model, r.usage))}</Text>
+            </Box>
+          </Box>,
+          settings,
+        ].filter(Boolean)
+      }
+
       return [
         <Box key={r.id} flexDirection="row" gap={1}>
           {cell(W.glyph, <Text color={color}>{glyph}</Text>)}
-          <Box flexGrow={1} flexShrink={1}>
+          <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
             <Text wrap="truncate-end" dimColor={r.status !== 'running'}>{r.label}</Text>
           </Box>
           {cell(W.model, <Text wrap="truncate-end" color={r.isOverridden ? 'suggestion' : undefined}>{shortModel(r.model)}</Text>)}
@@ -343,16 +378,9 @@ export const register: Register = on => {
           {cell(W.tokens, <Text>{tokens(totalTokens(r.usage))}</Text>, true)}
           {cell(W.time, <Text>{duration((r.endedAt ?? tick) - r.startedAt)}</Text>, true)}
           {wide && cell(W.cost, <Text dimColor>{money(costOf(r.model, r.usage))}</Text>, true)}
-          {cell(W.gear, r.status === 'running'
-            ? <Button key={`gear-${r.id}`} plain label={isOpen ? '▴' : hasOverride ? '◆' : '⚙'} onPress={edit(`agent:${r.id}`)} />
-            : <Text> </Text>)}
+          {cell(W.gear, gear)}
         </Box>,
-        isOpen && editor(
-          r.id,
-          own[r.id] ?? {},
-          o => update($, agentOverrides, all => ({ ...all, [r.id]: o })),
-          'Applies to this agent from its next model request.',
-        ),
+        settings,
       ].filter(Boolean)
     }
 
@@ -361,10 +389,12 @@ export const register: Register = on => {
       if (e.surface === 'desktop') {
         // `pad` px of air above and below the squares, inside the drawing: finer than a row margin.
         const size = 10, step = 14, pad = 5
+        const perRow = Math.max(1, Math.floor(((width - 4) * 6) / step))
+        const lines = Math.ceil(rows.length / perRow)
         const rects = rows.map((r, i) =>
-          `<rect x="${i * step}" y="${pad}" width="${size}" height="${size}" rx="2.5" fill="${HEX[r.status]}"/>`).join('')
-        const w = Math.max(size, rows.length * step - (step - size))
-        const barHeight = size + pad * 2
+          `<rect x="${(i % perRow) * step}" y="${pad + Math.floor(i / perRow) * step}" width="${size}" height="${size}" rx="2.5" fill="${HEX[r.status]}"/>`).join('')
+        const w = Math.max(size, Math.min(rows.length, perRow) * step - (step - size))
+        const barHeight = lines * step - (step - size) + pad * 2
         const { Svg } = $.ui.resolve(e)
         return (
           <Box key={`bar-${key}`} marginY={0}>
@@ -406,13 +436,13 @@ export const register: Register = on => {
       return (
         <Box key={`card-${key}`} flexDirection="column" borderStyle="round" borderColor={live > 0 ? 'claude' : undefined} borderDimColor={live === 0} paddingX={1} marginBottom={1}>
           <Box flexDirection="row" justifyContent="space-between" gap={1}>
-            <Box flexShrink={1}>
+            <Box flexShrink={1} minWidth={0}>
               <Button key={`fold-${key}`} plain onPress={toggle(key, isFolded)}>
                 {isFolded ? '▸ ' : '▾ '}<Text bold>{isWorkflow ? meta?.name ?? key : 'Subagents'}</Text>
               </Button>
             </Box>
             <Box flexDirection="row" gap={1} flexShrink={0}>
-              {live > 0 ? <Text color="claude">● {live} running</Text> : failed > 0 ? <Text color="error">✗ {failed} failed</Text> : <Text color="success">✓ done</Text>}
+              {live > 0 ? <Text color="claude">● {live}{layout === 'narrow' ? '' : ' running'}</Text> : failed > 0 ? <Text color="error">✗ {failed}{layout === 'narrow' ? '' : ' failed'}</Text> : <Text color="success">✓{layout === 'narrow' ? '' : ' done'}</Text>}
               <Button key={`gear-group-${key}`} plain label={groupOpen ? '▴' : hasGroupOverride ? '◆' : '⚙'} onPress={edit(`group:${key}`)} />
             </Box>
           </Box>
@@ -441,7 +471,7 @@ export const register: Register = on => {
                   <Text dimColor>{done}/{prs.length}</Text>
                 </Box>
                 {progress(`${key}-${p}`, prs)}
-                {columns(`cols-${key}-${p}`)}
+                {layout !== 'narrow' && columns(`cols-${key}-${p}`)}
                 {prs.flatMap(agentRow)}
               </Box>
             )

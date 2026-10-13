@@ -54,6 +54,16 @@ test('tracks a workflow agent, draws it in its phase, and applies a model/effort
     await pane.unmount()
   }
 
+  // A narrow pane stacks each agent on two lines and still shows its model, time and cost.
+  for (const surface of SURFACES) {
+    const narrow = { ...props, bodyColumns: 44 }
+    const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface, component: 'Pane', requestId: 'workflow-monitor', props: narrow, viewport: { columns: 44, rows: 40 } })
+    expect(await pane.find({ text: /investigate:detail-pages/ })).toBeTruthy()
+    expect(await pane.find({ text: 'Opus 5.5' })).toBeTruthy()
+    expect(await pane.find({ text: '$0.046' })).toBeTruthy()
+    await pane.unmount()
+  }
+
   // Open agent 2's editor and pick Haiku 5.5 at low effort; its next request uses them.
   const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'terminal', component: 'Pane', requestId: 'workflow-monitor', props, viewport })
   await pane.press({ key: 'gear-agent-2' })
