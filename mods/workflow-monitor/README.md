@@ -85,7 +85,7 @@ Examples:
 
 On a **running agent's row**, ⚙ opens a panel under it with:
 
-- **Pause / Resume.** Pause holds the agent's next model request until you resume it, so it stops between steps without losing anything.
+- **Pause / Resume.** Pause holds the agent at its next tool call until you resume it, so it stops between steps without losing anything. A model request already under way finishes first, and an agent that answers without calling a tool finishes instead of waiting. It waits at a tool call because Claude Code ends a background or workflow agent that shows no progress for 10 minutes (and starts it again), and a tool call that is still running doesn't count as no progress. While it waits, the monitor runs a short sleeper process (`ping` on Windows, `sleep` elsewhere) every 30 seconds, since a hook can't otherwise wait more than 10 seconds. If no wait process will start, the pause is lifted instead of seeming to hold: a toast and a note in Inspect say so.
 - **Stop.** Ends the agent now: its next request is answered with a final reply in the model's place, and further tool calls are refused, so it winds down cleanly.
 - **Model** and **Effort** pickers. They apply from the agent's next request.
 - **Inspect**, to open its activity.
@@ -96,7 +96,7 @@ The icon shows **◆** while a model or effort is set, and **▴** while its pan
 
 ### ↗ Inspect
 
-Opens the Inspect view in another tab: the agent's latest activity, its thinking, text and tool calls (the last 80 entries), with its status, model, effort and tokens on top. A running agent's Inspect follows along live and has Pause and Stop too.
+Opens the Inspect view in another tab: the agent's latest activity, its thinking, text and tool calls (the last 80 entries), with its status, model, effort and tokens on top. A running agent's Inspect follows along live and has Pause and Stop too. If Claude Code ended the agent itself after it showed no progress, its Inspect says so, how long it had been quiet, and which attempt took over.
 
 ### ✕ Archive
 
@@ -114,7 +114,8 @@ Cost is an estimate from Anthropic's list prices per million tokens (input, outp
 ## Notes and limits
 
 - The monitor keeps its data for the current session only: a new session starts with an empty board.
-- It lists agents that start after it loads. It keeps the latest 500 agents and the latest 200 activity entries per agent.
+- It lists agents that start after it loads. Agents already running when it loaded join at their next model request, and their tokens count from then. It keeps the latest 500 agents and the latest 200 activity entries per agent.
+- When Claude Code starts a stalled agent again, the new attempt joins the same card as `label (retry N)`, and the first attempt shows as stopped. A pause or stop, model or effort set on the first attempt carries over. Claude Code doesn't tell mods about these attempts, so the monitor finds them, and agents running before it loaded, in the session's files.
 - Workflow names, descriptions and phases come from the script's `meta`, read from where the Workflow tool saved it. If the script can't be read, the name and description come from the Workflow tool's launch result (or the script's file name) and the card has no phases. With neither, the card is named after its run id.
 
 ## Development

@@ -30,6 +30,14 @@ export type AgentRow = {
   pausedSince?: number
   /** Time spent paused and since resumed, left out of its elapsed time. */
   pausedTotal?: number
+  /** The attempt this one retries: Claude Code started that agent again, under this id, after it stalled. */
+  retryOf?: string
+  /** The attempt that retried this one. */
+  retriedBy?: string
+  /** When its last model request ended: the latest progress the monitor counted. */
+  activeAt?: number
+  /** How long it had gone without progress when it ended aborted and not stopped from the monitor. */
+  quietMs?: number
 }
 
 /** How a workflow run ended, as its task notification said: its script finished, threw, or was stopped. */
@@ -101,12 +109,17 @@ declare module 'claude-code' {
       collapsed: Record<string, boolean>
       /** Pause or stop asked of a running agent, by agent id. */
       controls: Record<string, Control>
-      /** Agents a pause is holding right now, before their next model request. */
+      /** Agents a pause is holding right now, before a tool call of theirs runs. */
       held: Record<string, boolean>
       /** The latest activity of each agent, by agent id, capped. */
       logs: Record<string, LogEntry[]>
       /** The agent the Inspect pane shows. */
       inspecting: string | null
+      /**
+       * The folder Claude Code keeps this session's transcript and subagent files in, once a hook
+       * named it: where an agent the monitor didn't see start is looked up.
+       */
+      sessionDir: string | null
     }
   }
 }

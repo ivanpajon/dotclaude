@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { Register } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentRow, AgentStatus, AgentUsage, Control, ControlItem, Idle, LogEntry, Override, RunOutcome, WorkflowMeta } from '../types'
 
@@ -17,8 +17,8 @@ const USAGE = [
   '| `/workflows help` | Show this help. |',
   '',
   '**In the pane**',
-  '- **⚙** opens the settings panel. On a running agent: pause or resume it, stop it, and pick the model and effort'
-    + ' of its next requests. On a card\'s header: the same for every agent in the workflow, the ones it starts later'
+  '- **⚙** opens the settings panel. On a running agent: pause it (at its next tool call) or resume it, stop it,'
+    + ' and pick the model and effort of its next requests. On a card\'s header: the same for every agent in the workflow, the ones it starts later'
     + ' too (an agent\'s own setting wins); once the workflow is over, Archive or Remove it. It shows **◆** while a'
     + ' model or effort is set.',
   '- **↗** opens the Inspect view in another tab: a finished agent\'s latest activity, its thinking, text and tool'
@@ -52,6 +52,7 @@ const inspecting = atom({ plugin: 'workflow-monitor', key: 'inspecting' } as con
 const idle = atom({ plugin: 'workflow-monitor', key: 'idle' } as const, {} as Record<string, Idle>)
 const archived = atom({ plugin: 'workflow-monitor', key: 'archived' } as const, {} as Record<string, number>)
 const archiveOpen = atom({ plugin: 'workflow-monitor', key: 'archiveOpen' } as const, false)
+const sessionDir = atom({ plugin: 'workflow-monitor', key: 'sessionDir' } as const, null as string | null)
 
 // USD per million tokens: [input, output, cache write (5 min), cache read].
 // Anthropic first-party list prices, 2026-10. Longer keys first: matched by substring.
@@ -213,7 +214,7 @@ const OUTCOMES: readonly RunOutcome[] = ['completed', 'failed', 'killed']
 // Records how the listed workflow runs a task notification reports on ended, by run: the Workflow
 // call it names launched or resumed the run (its launch result says, or its agents carry the call).
 // A plain subagent's own notification is left out.
-async function noteRunEnds($: Parameters<typeof read>[0], text: string) {
+async function noteRunEnds($: EngineInterface, text: string) {
   const list = (await read($, agents)).filter(a => a.runId)
   const runOf: Record<string, string> = { ...Object.fromEntries(list.filter(a => a.toolUseId).map(a => [a.toolUseId, a.runId!])), ...(await read($, calls)) }
   const listed = new Set(list.map(a => a.runId))
@@ -229,9 +230,10 @@ type Launch = { runId?: string; workflowName?: string; summary?: string; scriptP
 // Remembers a workflow's name and phases by its run, and which run the call launched or resumed.
 // The call's input reaches plugins empty, so the name comes from the launch result and the phases
 // from the saved script; an input that does carry the script (or a name) is read first.
-async function noteLaunch($: Parameters<typeof read>[0], toolUseId: string, input: { script?: string; name?: string; scriptPath?: string }, launch: Launch | undefined) {
+async function noteLaunch($: EngineInterface, toolUseId: string, input: { script?: string; name?: string; scriptPath?: string }, launch: Launch | undefined) {
   const run = launch?.runId || undefined
   const path = launch?.scriptPath ?? input.scriptPath
+  await noteSessionDir($, launch?.scriptPath)
   const script = input.script ?? (path ? await $.fs.read(path).catch(() => undefined) : undefined)
   const name = input.name ?? launch?.workflowName ?? path?.split(/[\\/]/).pop()?.replace(/\.[a-z]+$/, '')
   const meta = (typeof script === 'string' && parseMeta(script)) || (name ? { name, description: launch?.summary, phases: [] } : undefined)
@@ -240,6 +242,167 @@ async function noteLaunch($: Parameters<typeof read>[0], toolUseId: string, inpu
   await update($, calls, all => ({ ...all, [toolUseId]: run }))
   // A new call for a run (a resume) starts it again: how it ended before no longer holds.
   if ((await read($, outcomes))[run]) await update($, outcomes, ({ [run]: _, ...rest }) => rest)
+}
+
+// Remembers the folder Claude Code keeps the session's files in (beside its `<id>.jsonl`
+// transcript): from a hook's transcript path, or a workflow script saved under it.
+let knownDir: string | undefined
+async function noteSessionDir($: EngineInterface, path: string | undefined) {
+  const p = path?.replace(/\\/g, '/')
+  const cut = (mark: string) => (p?.includes(mark) ? p.slice(0, p.indexOf(mark)) : undefined)
+  const dir = cut('/subagents/') ?? cut('/workflows/scripts/') ?? (p?.endsWith('.jsonl') ? p.slice(0, -6) : undefined)
+  if (!dir || dir === knownDir) return
+  knownDir = dir
+  if ((await read($, sessionDir)) !== dir) await update($, sessionDir, () => dir)
+}
+
+// Lists a started agent: its row (with `change` made to the others in the same write), its card
+// back from Archived, its run going on again, and the pane open if nothing was running.
+async function listAgent($: EngineInterface, row: AgentRow, change = (all: AgentRow[]) => all) {
+  const before = await read($, agents)
+  const list = await update($, agents, all => [...change(all.filter(a => a.id !== row.id)), row].slice(-MAX_ROWS))
+  // A workflow archived between its phases comes back whole when its next agent starts; an
+  // agent started again under its old id comes back too.
+  await restoreAgents($, row.runId ? list.filter(a => a.runId === row.runId).map(a => a.id) : [row.id])
+  // A run that starts an agent goes on (a resumed one): how it ended before no longer holds.
+  if (row.runId && (await read($, outcomes))[row.runId]) await update($, outcomes, ({ [row.runId!]: _, ...rest }) => rest)
+  await syncIdle($, list, await read($, controls))
+  if (!before.some(a => a.status === 'running')) void $.ui.open({ id: PANE, title: TITLE })
+}
+
+// Agents the monitor didn't see start: a workflow agent Claude Code started again after it
+// stalled (a retry raises no agent.spawn), or one already running when the monitor loaded. Each is
+// looked up by id in the files Claude Code keeps for the session's subagents, a few times (they
+// may not be written yet), then given up on: the engine's own forks have none.
+const lookups = new Map<string, { tries: number; at: number }>()
+const adopting = new Map<string, Promise<AgentRow | undefined>>()
+// Agents removed from the monitor, never looked up again.
+const removed = new Set<string>()
+
+type Found = { runId?: string; label: string; type: string; effort?: string; toolUseId?: string; startedAt: number; retryOf?: string; index?: number }
+
+async function adopt($: EngineInterface, id: string, model: string): Promise<AgentRow | undefined> {
+  if (removed.has(id) || !(await read($, sessionDir))) return undefined
+  const pending = adopting.get(id)
+  if (pending) return pending
+  const t = await $.clock.now()
+  const seen = lookups.get(id)
+  if (seen && (seen.tries >= 5 || t - seen.at < 3000)) return undefined
+  const run = (async () => {
+    const found = await findAgent($, id, (seen?.tries ?? 0) >= 4).catch(() => undefined)
+    if (!found) {
+      lookups.set(id, { tries: (seen?.tries ?? 0) + 1, at: t })
+      return undefined
+    }
+    lookups.delete(id)
+    return adoptRow($, id, found, model)
+  })().finally(() => adopting.delete(id))
+  adopting.set(id, run)
+  return run
+}
+
+// Where an agent stands in the session's files: a plain subagent's meta, or a workflow run's, with
+// the run's journal naming every attempt at the agent() call it runs.
+async function findAgent($: EngineInterface, id: string, final: boolean): Promise<Found | undefined> {
+  const dir = await read($, sessionDir)
+  if (!dir) return undefined
+  const meta = async (path: string) => JSON.parse(await $.fs.read(path)) as { description?: string; agentType?: string; effort?: string; toolUseId?: string }
+  // The meta is written as the agent starts, and never again.
+  const startedAt = async (path: string) => (await $.fs.stat(path)).mtimeMs
+  const plain = `${dir}/subagents/agent-${id}.meta.json`
+  if (await $.fs.exists(plain)) {
+    const m = await meta(plain)
+    const base = m.description || m.agentType || id
+    // A background agent started again keeps its Agent call: any other attempt at that call came
+    // before, and the latest one not yet retried is the one this retries.
+    const earlier = m.toolUseId ? (await read($, agents)).filter(a => !a.runId && a.toolUseId === m.toolUseId && a.id !== id) : []
+    const prev = earlier.filter(a => !a.retriedBy && a.status !== 'done').at(-1)
+    return {
+      label: prev ? `${base} (retry ${earlier.length})` : base, type: m.agentType ?? 'subagent', effort: m.effort,
+      toolUseId: m.toolUseId, startedAt: await startedAt(plain), retryOf: prev?.id,
+    }
+  }
+  const root = `${dir}/subagents/workflows`
+  for (const run of (await $.fs.list(root).catch(() => [])).filter(x => x.kind === 'dir')) {
+    const file = `${root}/${run.name}/agent-${id}.meta.json`
+    if (!(await $.fs.exists(file))) continue
+    const m = await meta(file)
+    type Started = { type?: string; key?: string; agentId?: string; label?: string }
+    const journal = await $.fs.read(`${root}/${run.name}/journal.jsonl`).catch(() => '')
+    const started = journal.split('\n').filter(l => l.includes('"started"')).flatMap((l): Started[] => {
+      try { return [JSON.parse(l) as Started] } catch { return [] }
+    }).filter(s => s.type === 'started' && s.key)
+    const mine = started.find(s => s.agentId === id)
+    // Its line may not be written yet: looked for again, unless this is the last look.
+    if (journal && !mine && !final) return undefined
+    const base = mine?.label || m.description || id
+    const attempts = mine ? started.filter(s => s.key === mine.key) : []
+    let n = mine ? attempts.indexOf(mine) : 0
+    let retryOf = n > 0 ? attempts[n - 1]?.agentId : undefined
+    if (!journal) {
+      // No journal to read (over the read limit, or not there yet): an attempt with its label that
+      // already ended without progress, and wasn't retried yet, is the one this retries. One still
+      // running can't be told from a sibling with the same label, so it's left be.
+      const list = await read($, agents)
+      const prev = list.filter(a => a.runId === run.name && !a.retriedBy && a.status === 'stopped' && a.quietMs !== undefined
+        && (a.label === base || a.label.startsWith(`${base} (retry `))).at(-1)
+      const byId = new Map(list.map(a => [a.id, a]))
+      n = 0
+      for (let a = prev; a; a = a.retryOf ? byId.get(a.retryOf) : undefined) n++
+      retryOf = prev?.id
+    }
+    return {
+      runId: run.name, label: n > 0 ? `${base} (retry ${n})` : base, type: m.agentType ?? 'workflow-subagent',
+      startedAt: await startedAt(file), retryOf,
+      index: mine ? [...new Set(started.map(s => s.key))].indexOf(mine.key) + 1 : undefined,
+    }
+  }
+  return undefined
+}
+
+// Lists an agent found in the session's files. A retry takes its first attempt's place: that one is
+// over (Claude Code ended it before starting this one), and what the person set on it (pause or
+// stop, model and effort) carries over.
+async function adoptRow($: EngineInterface, id: string, found: Found, model: string): Promise<AgentRow> {
+  const t = await $.clock.now()
+  const first = found.retryOf ? (await read($, agents)).find(a => a.id === found.retryOf && !a.retriedBy && a.status !== 'done') : undefined
+  const row: AgentRow = {
+    id, runId: found.runId, toolUseId: found.toolUseId || first?.toolUseId || '', index: first?.index ?? found.index,
+    label: found.label, type: found.type, model, effort: found.effort, isOverridden: false,
+    status: 'running', startedAt: Math.min(found.startedAt || t, t), steps: 0, usage: ZERO,
+    ...(found.retryOf ? { retryOf: found.retryOf } : {}),
+  }
+  // A run that began before the monitor loaded: its name and phases from its saved script.
+  if (found.runId && !(await read($, workflows))[found.runId]) {
+    const scripts = `${await read($, sessionDir)}/workflows/scripts`
+    const file = (await $.fs.list(scripts).catch(() => [])).find(x => x.name.endsWith(`-${found.runId}.js`))
+    const meta = file && parseMeta(await $.fs.read(`${scripts}/${file.name}`).catch(() => ''))
+    if (meta) await update($, workflows, all => ({ ...all, [found.runId!]: meta }))
+  }
+  // Its agent.spawn may have listed it meanwhile.
+  const listed = (await read($, agents)).find(a => a.id === id)
+  if (listed) return listed
+  if (first) {
+    const carried = (await read($, controls))[first.id] ?? ended.get(first.id)?.control
+    ended.delete(first.id)
+    const quietMs = quietOf(first, t)
+    pauseRequested.delete(first.id)
+    stopRequested.delete(first.id)
+    stoppers.delete(first.id)
+    progress.delete(first.id)
+    wake(first.id)
+    await closeSettings($, [first.id])
+    await update($, controls, ({ [first.id]: _, ...rest }) => rest)
+    const own = (await read($, agentOverrides))[first.id]
+    if (own) await update($, agentOverrides, all => ({ ...all, [id]: own }))
+    await listAgent($, row, all => all.map(a => (a.id !== first.id ? a : {
+      ...a, retriedBy: id, ...(a.status === 'running' ? { status: 'stopped' as const, endedAt: t, quietMs } : {}),
+    })))
+    if (carried) await setControl($, [id], carried)
+  } else {
+    await listAgent($, row)
+  }
+  return row
 }
 
 // An agent's phase: its label's prefix (`investigate:x`) matched to a phase title.
@@ -262,12 +425,14 @@ function toolSummary(json: string): string {
   }
 }
 
-// Releases a paused agent's held request: on resume, stop, or the turn's abort.
-const waiters = new Map<string, () => void>()
+// Releases a paused agent's held tool calls (several run at once): on resume, stop, or the abort.
+const waiters = new Map<string, Set<() => void>>()
 const wake = (id: string) => {
-  waiters.get(id)?.()
+  for (const resolve of waiters.get(id) ?? []) resolve()
   waiters.delete(id)
 }
+// How many of each agent's tool calls a pause holds right now.
+const holds = new Map<string, number>()
 // Pause and Stop asked of each agent, as this module knows them this instant; the cut for the
 // reply a stopped agent is streaming now. The hold and the cut go by these, not by `controls`:
 // every read of one dispatch sees one moment, so a request that read `controls` just before a
@@ -275,9 +440,20 @@ const wake = (id: string) => {
 const pauseRequested = new Set<string>()
 const stopRequested = new Set<string>()
 const stoppers = new Map<string, () => void>()
+// The latest progress of each listed agent (a request starting, streaming or ending, a tool call
+// ending), and how many of its tool calls are running: what Claude Code's stall check goes by.
+const progress = new Map<string, number>()
+const busy = new Map<string, number>()
+// The pause or stop on an agent that ended aborted, for the retry Claude Code may start in its
+// place once that end is reported; kept half an hour.
+const ended = new Map<string, { control: Control; at: number }>()
+
+// How long an agent had gone without progress at `t`; none while a tool call of its runs.
+const quietOf = (a: AgentRow, t: number) =>
+  (busy.get(a.id) ? 0 : t - Math.max(progress.get(a.id) ?? 0, a.activeAt ?? a.startedAt))
 
 // Pause, resume (null) or stop agents, from either pane, and the workflow counters that follow.
-async function setControl($: Parameters<typeof read>[0], ids: string[], v: Control | null) {
+async function setControl($: EngineInterface, ids: string[], v: Control | null) {
   for (const id of ids) {
     if (v === 'pause') pauseRequested.add(id)
     else pauseRequested.delete(id)
@@ -308,6 +484,58 @@ async function setControl($: Parameters<typeof read>[0], ids: string[], v: Contr
   }
   // From what it just wrote: read back in this dispatch, the state would still show the moment before.
   await syncIdle($, list, ctl)
+}
+
+// A pause holds an agent at a tool call, never at a model request: Claude Code ends a workflow
+// agent whose request makes no progress for 10 minutes, but never while one of its tool calls is
+// running, so a pause there can last all night. A hook's 10-second budget counts a plain wait and
+// not a `$` call, so the hold waits on the host (see nap), racing the resume, which lets go at once.
+// False if the host ran no wait, so the hold couldn't last.
+async function hold($: EngineInterface, id: string, signal: AbortSignal): Promise<boolean> {
+  holds.set(id, (holds.get(id) ?? 0) + 1)
+  if (holds.get(id) === 1) await update($, held, all => ({ ...all, [id]: true }))
+  try {
+    while (pauseRequested.has(id) && !stopRequested.has(id) && !signal.aborted) {
+      let release = () => {}
+      const resumed = new Promise<void>(resolve => { release = resolve })
+      const set = waiters.get(id) ?? new Set<() => void>()
+      set.add(release)
+      waiters.set(id, set)
+      signal.addEventListener('abort', release, { once: true })
+      // A resume that landed while the hold began still lets it go.
+      if (!pauseRequested.has(id)) release()
+      const waited = await Promise.race([resumed.then(() => true), nap($)])
+      set.delete(release)
+      signal.removeEventListener('abort', release)
+      if (!waited) return false
+    }
+    return true
+  } finally {
+    const left = (holds.get(id) ?? 1) - 1
+    if (left > 0) holds.set(id, left)
+    else {
+      holds.delete(id)
+      await update($, held, ({ [id]: _, ...rest }) => rest)
+    }
+  }
+}
+
+// Half a minute's wait on the host: a child that sleeps (`ping` on Windows, which has no `sleep`).
+// One that fails (it can't start, a sleeping machine cut it short, another `ping` comes first on
+// the PATH) gives way to the next; false once none would wait.
+let sleepers: (readonly string[])[] | undefined
+let sleeper = 0
+async function nap($: EngineInterface): Promise<boolean> {
+  sleepers ??= (await $.env.get('OS').catch(() => undefined)) === 'Windows_NT'
+    ? [['ping', '-n', '31', '127.0.0.1'], ['powershell', '-NoProfile', '-Command', 'Start-Sleep -Seconds 30']]
+    : [['sleep', '30'], ['/bin/sleep', '30']]
+  for (let tries = 0; tries < sleepers.length * 2; tries++) {
+    const argv = sleepers[sleeper % sleepers.length] ?? []
+    const done = await $.process.run(argv, { timeoutMs: 60_000 }).catch(() => undefined)
+    if (done?.exitCode === 0) return true
+    sleeper++
+  }
+  return false
 }
 
 // An agent is working while it runs with no pause or stop asked of it; only then does its time count.
@@ -358,7 +586,7 @@ const lastEnd = (rows: AgentRow[]) => Math.max(...rows.map(r => r.endedAt ?? r.s
 // Marks workflow runs gone quiet: no agent running and no word of their end for a while. Each mark
 // keeps the last start or end it was judged from, so an agent starting or ending since leaves it
 // stale (see the Pane's `isQuiet`) with nothing to clear.
-async function noteQuiet($: Parameters<typeof read>[0], t: number) {
+async function noteQuiet($: EngineInterface, t: number) {
   const list = await read($, agents)
   const ends = await read($, outcomes)
   const marked = await read($, quiet)
@@ -374,7 +602,7 @@ async function noteQuiet($: Parameters<typeof read>[0], t: number) {
 // A workflow's counter stops while none of its agents is working (all paused, stopping or done
 // beside them) and picks up from there when one works again. Written only when that changes.
 // `list` and `ctl` are as the caller just wrote them.
-async function syncIdle($: Parameters<typeof read>[0], list: AgentRow[], ctl: Record<string, Control>) {
+async function syncIdle($: EngineInterface, list: AgentRow[], ctl: Record<string, Control>) {
   const t = await $.clock.now()
   const all = await read($, idle)
   const changes: Record<string, Idle> = {}
@@ -390,7 +618,7 @@ async function syncIdle($: Parameters<typeof read>[0], list: AgentRow[], ctl: Re
 
 // A finished agent's settings panel closes: nothing in it applies any more. So does the panel of
 // a group whose card leaves the pane.
-async function closeSettings($: Parameters<typeof read>[0], ids: string[], groups: string[] = []) {
+async function closeSettings($: EngineInterface, ids: string[], groups: string[] = []) {
   const open = await read($, editing)
   if (open && (ids.some(id => open === `agent:${id}`) || groups.some(g => open === `group:${g}`))) {
     await update($, editing, cur => (cur === open ? null : cur))
@@ -402,13 +630,13 @@ const without = <V,>(all: Record<string, V>, keys: Set<string>): Record<string, 
   Object.fromEntries(Object.entries(all).filter(([k]) => !keys.has(k)))
 
 // Brings archived agents back to their card; written only when one of them is archived.
-async function restoreAgents($: Parameters<typeof read>[0], ids: string[]) {
+async function restoreAgents($: EngineInterface, ids: string[]) {
   const back = new Set(ids)
   if (Object.keys(await read($, archived)).some(id => back.has(id))) await update($, archived, all => without(all, back))
 }
 
 // Archives agents: their card leaves the pane for the Archived section, whole and restorable.
-async function archiveAgents($: Parameters<typeof read>[0], ids: string[]) {
+async function archiveAgents($: EngineInterface, ids: string[]) {
   if (!ids.length) return
   const t = await $.clock.now()
   const list = await read($, agents)
@@ -422,13 +650,16 @@ async function archiveAgents($: Parameters<typeof read>[0], ids: string[]) {
 
 // Removes agents from the monitor for good: their rows, activity and all the pane kept about
 // them. Their work itself is untouched. A group left with no agents starts afresh if one joins.
-async function removeAgents($: Parameters<typeof read>[0], ids: string[]) {
+async function removeAgents($: EngineInterface, ids: string[]) {
   if (!ids.length) return
   const gone = new Set(ids)
   for (const id of ids) {
     pauseRequested.delete(id)
     stopRequested.delete(id)
     stoppers.delete(id)
+    progress.delete(id)
+    ended.delete(id)
+    removed.add(id)
     wake(id)
   }
   const groups = [...new Set((await read($, agents)).filter(a => gone.has(a.id)).map(groupKey))]
@@ -487,7 +718,7 @@ function keeper(site: string) {
 const byHook = () => {}
 
 // Runs a control by its key, as pressed or picked in either pane.
-async function perform($: Parameters<typeof read>[0], key: string, value?: string) {
+async function perform($: EngineInterface, key: string, value?: string) {
   const list = await read($, agents)
   const ctl = await read($, controls)
   const agent = (id: string) => list.find(a => a.id === id)
@@ -581,7 +812,7 @@ function demoSeed(t: number): { rows: AgentRow[]; logs: Record<string, LogEntry[
 
 // Takes the demo away: its rows as Remove does, then anything else keyed by a demo id (a tick
 // that read the demo just before its rows went may still have written some).
-async function clearDemo($: Parameters<typeof read>[0]) {
+async function clearDemo($: EngineInterface) {
   await removeAgents($, (await read($, agents)).filter(a => a.id.startsWith(DEMO)).map(a => a.id))
   const ids = [
     ...pauseRequested, ...stopRequested,
@@ -597,7 +828,7 @@ async function clearDemo($: Parameters<typeof read>[0]) {
 
 // One second of the demo, written only when something changed, as real agents are: Pause and
 // Stop land at once, and every other second one working agent finishes a model step.
-async function demoTick($: Parameters<typeof read>[0], t: number) {
+async function demoTick($: EngineInterface, t: number) {
   const ctl = await read($, controls)
   const holding = await read($, held)
   const demo = (await read($, agents)).filter(a => a.id.startsWith(DEMO) && a.status === 'running')
@@ -726,16 +957,41 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Workflow' }, async ($, e, next) => {
     const done = await next(e)
     const launch = 'result' in done && !done.isError && typeof done.result === 'object' ? done.result as Launch : undefined
-    await noteLaunch($, e.tool_use_id, (e.input ?? {}) as { script?: string; name?: string; scriptPath?: string }, launch).catch(() => {})
+    await noteLaunch($, e.tool_use_id, ((e as { input?: unknown }).input ?? e) as { script?: string; name?: string; scriptPath?: string }, launch).catch(() => {})
 
     return done
   })
 
-  // A stopped agent runs no more tools: the calls it already asked for are refused.
+  // A paused agent's tool call waits here until it is resumed (see hold). A stopped agent runs no
+  // more tools: the calls it already asked for are refused.
   on('tool.call', async ($, e, next) => {
-    if (e.agentId && stopRequested.has(e.agentId)) {
-      return { deny: 'Stopped from the workflow monitor. Do not retry; finish now.' }
+    const id = e.agentId
+    if (!id) return next(e)
+    busy.set(id, (busy.get(id) ?? 0) + 1)
+    try {
+      const isHeld = pauseRequested.has(id) && !stopRequested.has(id)
+      if (isHeld && !(await hold($, id, next.signal)) && pauseRequested.has(id)) {
+        // No wait would start on this machine: the pause is lifted, saying so, and the call runs.
+        await setControl($, [id], null)
+        const text = 'The pause couldn’t hold this agent (no wait process would start here), so it went on.'
+        await update($, logs, all => ({ ...all, [id]: [...(all[id] ?? []), { kind: 'note' as const, text }].slice(-MAX_LOG) }))
+        $.ui.toast(`Workflow monitor: ${text}`)
+      }
+      if (stopRequested.has(id)) return { deny: 'Stopped from the workflow monitor. Do not retry; finish now.' }
+      if (isHeld && next.signal.aborted) return { deny: 'Interrupted while paused from the workflow monitor.' }
+      return await next(e)
+    } finally {
+      const left = (busy.get(id) ?? 1) - 1
+      if (left > 0) busy.set(id, left)
+      else busy.delete(id)
+      if (progress.has(id)) progress.set(id, await $.clock.now())
     }
+  })
+
+  // The session's folder, where agents the monitor didn't see start are looked up (see adopt):
+  // every tool call's classic hook names it, in any agent.
+  on('classic.PostToolUse', async ($, e, next) => {
+    await noteSessionDir($, e.transcript_path).catch(() => {})
 
     return next(e)
   })
@@ -758,15 +1014,7 @@ export const register: Register = on => {
       steps: 0,
       usage: ZERO,
     }
-    const before = await read($, agents)
-    const list = await update($, agents, all => [...all.filter(a => a.id !== row.id), row].slice(-MAX_ROWS))
-    // A workflow archived between its phases comes back whole when its next agent starts; an
-    // agent started again under its old id comes back too.
-    await restoreAgents($, row.runId ? list.filter(a => a.runId === row.runId).map(a => a.id) : [row.id])
-    // A run that starts an agent goes on (a resumed one): how it ended before no longer holds.
-    if (row.runId && (await read($, outcomes))[row.runId]) await update($, outcomes, ({ [row.runId!]: _, ...rest }) => rest)
-    await syncIdle($, list, await read($, controls))
-    if (!before.some(a => a.status === 'running')) void $.ui.open({ id: PANE, title: TITLE })
+    await listAgent($, row)
 
     return started
   })
@@ -776,20 +1024,6 @@ export const register: Register = on => {
 
     const id = e.agentId
 
-    // Pause: hold this request until resumed, stopped, or the turn is aborted. A stop wins.
-    if (pauseRequested.has(id) && !stopRequested.has(id)) {
-      await update($, held, all => ({ ...all, [id]: true }))
-      while (pauseRequested.has(id) && !next.signal.aborted) {
-        await new Promise<void>(resolve => {
-          waiters.set(id, resolve)
-          next.signal.addEventListener('abort', () => resolve(), { once: true })
-          // A resume that landed while the hold began still lets it go.
-          if (!pauseRequested.has(id)) resolve()
-        })
-      }
-      await update($, held, ({ [id]: _, ...rest }) => rest)
-    }
-
     // Stop: answer in the model's place with a final reply, so the agent's loop ends cleanly.
     if (stopRequested.has(id)) {
       await update($, logs, all => ({ ...all, [id]: [...(all[id] ?? []), { kind: 'note' as const, text: 'Stopped from the workflow monitor.' }].slice(-MAX_LOG) }))
@@ -797,9 +1031,11 @@ export const register: Register = on => {
       return { turnId: e.turnId, index: e.index, answer: STOP_TEXT, toolUses: [], stopReason: 'end_turn', usage: null }
     }
 
-    // An agent the monitor doesn't list (started before it loaded, or removed from it) is left be.
-    const row = (await read($, agents)).find(a => a.id === id)
+    // An agent the monitor didn't see start is looked up (see adopt); one it can't place, or removed
+    // from it, is left be.
+    const row = (await read($, agents)).find(a => a.id === id) ?? await adopt($, id, e.model)
     if (!row) return yield* next(e)
+    progress.set(id, await $.clock.now())
     const own = (await read($, agentOverrides))[id] ?? {}
     const group = (await read($, groupOverrides))[groupKey(row)] ?? {}
     const model = own.model ?? group.model
@@ -840,7 +1076,10 @@ export const register: Register = on => {
       } else if (c.kind === 'input') {
         inputs.set(c.index, (inputs.get(c.index) ?? '') + c.json)
       }
-      if (c.kind === 'tool' || ++chunks % 12 === 0) await flush()
+      if (c.kind === 'tool' || ++chunks % 12 === 0) {
+        await flush()
+        progress.set(id, await $.clock.now())
+      }
       yield c
       step = stopRequested.has(id) ? 'stop' : await Promise.race([stream.next(), cut])
     }
@@ -857,8 +1096,10 @@ export const register: Register = on => {
     const result = step.value
     await flush()
     const usage = result.usage
+    const activeAt = await $.clock.now()
+    progress.set(id, activeAt)
     await update($, agents, list =>
-      list.map(a => (a.id === id ? { ...a, steps: a.steps + 1, usage: usage ? addUsage(a.usage, usage) : a.usage } : a)),
+      list.map(a => (a.id === id ? { ...a, steps: a.steps + 1, activeAt, usage: usage ? addUsage(a.usage, usage) : a.usage } : a)),
     )
 
     return result
@@ -870,9 +1111,18 @@ export const register: Register = on => {
       const endedAt = await $.clock.now()
       const wasStopped = stopRequested.has(id)
       const status: AgentStatus = wasStopped || e.reason === 'aborted' ? 'stopped' : e.reason === 'answer' ? 'done' : 'failed'
+      // Ended from outside the monitor (Claude Code's stall check, the run stopped, an interrupt):
+      // how long it had gone without progress, for its Inspect view. A retried attempt was ended,
+      // with all that, as its retry started.
+      const row = (await read($, agents)).find(a => a.id === id)
+      const outside = row && e.reason === 'aborted' && !wasStopped ? { quietMs: quietOf(row, endedAt) } : {}
+      const control = (await read($, controls))[id]
+      for (const [k, v] of ended) if (endedAt - v.at > 30 * 60_000) ended.delete(k)
+      if (row && !row.retriedBy && e.reason === 'aborted' && control) ended.set(id, { control, at: endedAt })
       pauseRequested.delete(id)
       stopRequested.delete(id)
       stoppers.delete(id)
+      progress.delete(id)
       wake(id)
       await closeSettings($, [id])
       const ctl = await update($, controls, ({ [id]: _, ...rest }) => rest)
@@ -881,7 +1131,8 @@ export const register: Register = on => {
           if (a.id !== id) return a
           // Steps already counted each request; fall back to the turn's total if none reported.
           const counted = totalTokens(a.usage) > 0
-          return { ...a, status, endedAt, usage: !counted && e.usage ? addUsage(ZERO, e.usage) : a.usage }
+          const usage = !counted && e.usage ? addUsage(ZERO, e.usage) : a.usage
+          return a.retriedBy ? { ...a, usage } : { ...a, status, endedAt, ...outside, usage }
         }),
       )
       await syncIdle($, list, ctl)
@@ -1042,7 +1293,7 @@ export const register: Register = on => {
       const settings = isOpen && editor(
         r.id,
         own[r.id] ?? {},
-        'Pause holds its next model request; Stop ends it now. Model and effort apply from its next request.',
+        'Pause holds its next tool call; Stop ends it now. Model and effort apply from its next request.',
         [
           ...(r.status === 'running' ? [
             button(`pause-${r.id}`, paused ? '▶ Resume' : '⏸ Pause'),
@@ -1296,10 +1547,20 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: INSPECT }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const id = await read($, inspecting)
-    const r = (await read($, agents)).find(a => a.id === id)
+    const list = await read($, agents)
+    const r = list.find(a => a.id === id)
     if (!id || !r) {
       return <Box paddingX={1}><Text dimColor>Pick Inspect on an agent in the Workflows pane.</Text></Box>
     }
+    // How it ended when the monitor didn't end it: a retry says Claude Code's stall check did;
+    // without one it may have been that, the run stopped, or an interrupt. Said here, not on its row.
+    const labelOf = (other: string) => list.find(a => a.id === other)?.label
+    const quiet = r.quietMs !== undefined && r.quietMs >= 60_000 ? ` after ${duration(r.quietMs)} without progress` : ''
+    const ending = r.retriedBy
+      ? `Ended by Claude Code${quiet}; retried as “${labelOf(r.retriedBy) ?? 'a new attempt'}”.`
+      : r.status === 'stopped' && r.quietMs !== undefined ? `Ended outside the monitor${quiet}.` : undefined
+    const origin = r.retryOf && labelOf(r.retryOf)
+    const retried = origin ? `Started by Claude Code after “${origin}” made no progress.` : undefined
     const ctl = (await read($, controls))[id]
     const entries = ((await read($, logs))[id] ?? []).slice(-80)
     const [glyph, color] = look(r, ctl)
@@ -1328,6 +1589,8 @@ export const register: Register = on => {
           <Box flexShrink={1} minWidth={0}><Text bold wrap="truncate-end">{r.label}</Text></Box>
           <Text><Text color={color}>{glyph} {status}</Text><Text dimColor> · {shortModel(r.model)} · {effortLabel(r.effort)} · {tokens(totalTokens(r.usage))} tok</Text></Text>
         </Box>
+        {retried && <Box marginTop={1}><Text color="inactive" wrap="wrap">{retried}</Text></Box>}
+        {ending && <Box marginTop={1}><Text color={STOPPED} wrap="wrap">{ending}</Text></Box>}
         {r.status === 'running' && (
           <Box flexDirection="row" gap={1} marginTop={1}>
             {control(`pause-${id}`, ctl === 'pause' ? '▶ Resume' : '⏸ Pause')}

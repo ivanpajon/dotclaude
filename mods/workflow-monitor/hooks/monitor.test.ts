@@ -8,6 +8,11 @@ const SCRIPT = `export const meta = {
   phases: [{ title: 'Investigate' }, { title: 'Critique' }],
 }
 phase('Investigate')`
+// The host's wait while a pause holds a tool call (see nap), a tenth of a second here.
+const NAP = async () => {
+  await new Promise(resolve => setTimeout(resolve, 100))
+  return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+}
 // A background task's end, as its notification reaches the session.
 const ended = (toolUseId: string, status: string) =>
   `<task-notification>\n<task-id>bg_${toolUseId}</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n<status>${status}</status>\n<summary>Workflow ${status}</summary>\n</task-notification>`
@@ -17,6 +22,7 @@ test('tracks a workflow agent, applies overrides, and pauses, stops and inspects
   let clock = 1_000_000
   const sent: { model: string; effort?: unknown }[] = []
   on('clock.now', () => ({ value: (clock += 500) }))
+  on('process.run', NAP)
   on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: `agent-${++n}` }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   const ran: string[] = []
@@ -108,17 +114,22 @@ test('tracks a workflow agent, applies overrides, and pauses, stops and inspects
     await inspect.unmount()
   }
 
-  // Pause holds the next request until Resume.
+  // Pause holds its next tool call until Resume; its model requests go on meanwhile.
   await pane.press({ key: 'pause-agent-2' })
-  const before = sent.length
+  expect(await pane.find({ text: /pausing…/ })).toBeTruthy()
   let finished = false
-  const held = step('agent-2', 1).then(() => { finished = true })
-  for (let i = 0; i < 5; i++) await Promise.resolve()
+  const held = $.tool.call({ tool: 'Grep', tool_use_id: 'toolu_g', input: { pattern: 'cart' }, agentId: 'agent-2' }).then(r => { finished = true; return r })
+  await new Promise(resolve => setTimeout(resolve, 100))
   expect(finished).toBe(false)
-  expect(sent.length).toBe(before)
-  await pane.press({ key: 'pause-agent-2' })
-  await held
+  expect(ran).not.toContain('Grep')
+  // Held: no longer on its way to paused.
+  expect(await pane.find({ text: /pausing…/ })).toBeFalsy()
+  const before = sent.length
+  await step('agent-2', 1)
   expect(sent.length).toBe(before + 1)
+  await pane.press({ key: 'pause-agent-2' })
+  expect('deny' in (await held)).toBe(false)
+  expect(ran).toContain('Grep')
 
   // Stop refuses its tool calls and answers its next request with a final reply.
   await pane.press({ key: 'stop-agent-2' })
@@ -589,6 +600,7 @@ test('/workflows clear and a fresh /workflows demo leave nothing of the old behi
 
 test('a card\'s status chip says where its group stands, at any width', async ($, on) => {
   const clock = mock.clock(on, { now: 20_000_000 })
+  on('process.run', NAP)
   let n = 0
   // What each Workflow call's launch returns, by call; one not listed launches with no record.
   const launches: Record<string, object> = {}
@@ -613,12 +625,8 @@ test('a card\'s status chip says where its group stands, at any width', async ($
     $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: reason === 'aborted', turnId: `t-${id}`, agentId: id, reason })
   const notify = (toolUseId: string, status: string) =>
     $.prompt.submit({ text: ended(toolUseId, status), wait: false, origin: { kind: 'task-notification' } })
-  // An agent's next model request, read to its end: a pause holds it there until resumed.
-  const request = async (agentId: string) => {
-    const stream = $.turn.step({ turnId: `t-${agentId}`, index: 1, model: 'claude-opus-5-5', effort: 'high', messageCount: 1, agentId })
-    const it = stream[Symbol.asyncIterator]()
-    while (!(await it.next()).done) { /* read on */ }
-  }
+  // An agent's next tool call: a pause holds it there until resumed.
+  const request = (agentId: string) => $.tool.call({ tool: 'Read', tool_use_id: `toolu_r_${agentId}`, input: { file_path: 'a' }, agentId })
 
   await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_c', input: { script: SCRIPT } })
   for (let i = 1; i <= 5; i++) await spawn('toolu_c', 'wf_c', i)
@@ -661,7 +669,7 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   expect(await atWidths('wf_c')).toEqual(['●2 ✗1 ⏹1 ✓1', '●2 ✗1 ⏹1 ✓1'])
   expect((await card('wf_c'))?.borderColor).toBe('#4D9DF0')
 
-  // Pausing them all: amber, and "…" until each is held at its next request.
+  // Pausing them all: amber, and "…" until each is held at its next tool call.
   await pane.press({ key: 'gear-group-wf_c' })
   await pane.press({ key: 'pause-all-wf_c' })
   expect(await chipOf(pane, 'wf_c')).toBe('⏸ 2… · ✗ 1 · ⏹ 1 · ✓ 1')
@@ -885,4 +893,215 @@ test('/workflows says what it does and takes: in the typeahead, with help, and o
   expect(opened).toBe(0)
   expect((await $.command.run({ command: 'workflows', args: '' })).text).toBe('Workflow monitor opened.')
   expect(opened).toBe(1)
+})
+
+test('a pause outlasts a hook\'s 10-second budget, waiting on the host, and Resume lets go at once', { timeoutMs: 25_000 }, async ($, on) => {
+  const ran: string[] = []
+  const naps: (readonly string[])[] = []
+  mock.env(on, { OS: 'Windows_NT' })
+  on('clock.now', () => ({ value: 45_000_000 }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: 'agent-h' }))
+  on('tool.call', (_$, e) => (ran.push(e.tool), { result: 'ok' }))
+  // Each wait on the host: a child that sleeps, here two seconds of real time.
+  on('process.run', async (_$, e) => {
+    naps.push(e.argv)
+    await new Promise(resolve => setTimeout(resolve, 2_000))
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  await $.agent.spawn({
+    tool_use_id: 'toolu_h', prompt: 'p', description: 'Long task', subagentType: 'general-purpose',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false,
+  })
+  const pane = await $.ui.mount({
+    plugin: 'workflow-monitor', surface: 'terminal', component: 'Pane', requestId: 'workflow-monitor',
+    props: { title: 'Workflows', isFocused: false, bodyColumns: 110 }, viewport: { columns: 110, rows: 40 },
+  })
+  await pane.press({ key: 'gear-agent-h' })
+  await pane.press({ key: 'pause-agent-h' })
+  let settled = false
+  const held = $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_b', input: { command: 'npm test' }, agentId: 'agent-h' })
+    .then(r => { settled = true; return r })
+  // Past the budget the call is still held: a plain wait would have been cut there, and the tool run.
+  await new Promise(resolve => setTimeout(resolve, 11_000))
+  expect(settled).toBe(false)
+  expect(ran).not.toContain('Bash')
+  expect(naps.length).toBeGreaterThanOrEqual(5)
+  expect(naps[0]).toEqual(['ping', '-n', '31', '127.0.0.1'])
+  // Resume lets it go without waiting out the host's current wait.
+  const resumedAt = Date.now()
+  await pane.press({ key: 'pause-agent-h' })
+  expect('deny' in (await held)).toBe(false)
+  expect(Date.now() - resumedAt).toBeLessThan(1_500)
+  expect(ran).toContain('Bash')
+  await pane.unmount()
+})
+
+test('a pause that can\'t wait on the host is lifted, saying so, instead of seeming to hold', async ($, on) => {
+  const ran: string[] = []
+  const tried: (readonly string[])[] = []
+  mock.env(on, { OS: 'Windows_NT' })
+  on('clock.now', () => ({ value: 46_000_000 }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: 'agent-n' }))
+  on('tool.call', (_$, e) => (ran.push(e.tool), { result: 'ok' }))
+  // Neither way to wait will start.
+  on('process.run', (_$, e) => {
+    tried.push(e.argv)
+    throw new Error(`spawn ${e.argv[0]} ENOENT`)
+  })
+  await $.agent.spawn({
+    tool_use_id: 'toolu_n', prompt: 'p', description: 'Long task', subagentType: 'general-purpose',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false,
+  })
+  const props = { title: 'Workflows', isFocused: false, bodyColumns: 110 }
+  const viewport = { columns: 110, rows: 40 }
+  const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'terminal', component: 'Pane', requestId: 'workflow-monitor', props, viewport })
+  await pane.press({ key: 'gear-agent-n' })
+  await pane.press({ key: 'pause-agent-n' })
+  const done = await $.tool.call({ tool: 'Bash', tool_use_id: 'toolu_nb', input: { command: 'npm test' }, agentId: 'agent-n' })
+  expect('deny' in done).toBe(false)
+  expect(ran).toContain('Bash')
+  // Each way was tried twice, then the pause lifted: the pane no longer shows it paused.
+  expect(tried.length).toBe(4)
+  expect(tried[1]?.[0]).toBe('powershell')
+  expect(await pane.find({ text: /pausing…/ })).toBeFalsy()
+  await pane.press({ key: 'activity-agent-n' })
+  const view = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'terminal', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport })
+  expect(await view.find({ text: /The pause couldn’t hold this agent/ })).toBeTruthy()
+  await view.unmount()
+  await pane.unmount()
+})
+
+test('agents it didn\'t see start join their cards: a stalled agent\'s retry, and ones running before it loaded', async ($, on) => {
+  const clock = mock.clock(on, { now: 50_000_000 })
+  let n = 0
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: `agent-r${++n}` }))
+  on('turn.step', async function* (_$, e) {
+    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: USAGE }
+  })
+  on('turn.complete', () => ({ text: 'ok' }))
+  // The session's files as Claude Code keeps them, in a folder beside its transcript.
+  const dir = 'C:/u/.claude/projects/repo/sess'
+  const files: Record<string, string> = { [`${dir}/workflows/scripts/fixes-wf_r.js`]: SCRIPT }
+  const norm = (path: string) => path.replace(/\\/g, '/')
+  const missing = (path: string): never => { throw new Error(`ENOENT: no such file, ${path}`) }
+  on('fs.read', (_$, e) => (norm(e.path) in files ? { value: files[norm(e.path)] ?? '' } : missing(e.path)))
+  on('fs.exists', (_$, e) => ({ value: norm(e.path) in files }))
+  on('fs.stat', (_$, e) => (norm(e.path) in files
+    ? { value: { kind: 'file' as const, size: 1, mtimeMs: clock.now(), isLink: false } }
+    : missing(e.path)))
+  on('fs.list', (_$, e) => {
+    const at = `${norm(e.path)}/`
+    const names = new Set(Object.keys(files).filter(p => p.startsWith(at)).map(p => p.slice(at.length).split('/')[0] ?? ''))
+    const kind = (name: string) => (Object.keys(files).some(p => p.startsWith(`${at}${name}/`)) ? 'dir' as const : 'file' as const)
+    return { value: [...names].map(name => ({ name, kind: kind(name), size: 0, mtimeMs: 0, isLink: false })) }
+  })
+  on('tool.call', (_$, e) => ({
+    result: e.tool === 'Workflow'
+      ? { status: 'async_launched', runId: 'wf_r', workflowName: 'store-switch-design', scriptPath: 'C:\\u\\.claude\\projects\\repo\\sess\\workflows\\scripts\\fixes-wf_r.js' }
+      : 'ok',
+  }))
+  const step = async (agentId: string) => {
+    const stream = $.turn.step({ turnId: `t-${agentId}`, index: 0, model: 'claude-opus-5-5', effort: 'high', messageCount: 1, agentId })
+    for await (const _ of stream) { /* read on */ }
+  }
+  const meta = (description: string) => JSON.stringify({ agentType: 'workflow-subagent', description, workflowPhase: 'Investigate', spawnDepth: 1 })
+  const started = (agentId: string, key = 'v2:k1', label = 'investigate:payments') => JSON.stringify({ type: 'started', key, agentId, label, phase: 'Investigate' })
+  const journal = (...lines: string[]) => [JSON.stringify({ type: 'launched' }), ...lines].join('\n') + '\n'
+
+  // The run's launch names the session's folder; its first agent starts and makes a request.
+  await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_r', input: {} })
+  await $.agent.spawn({
+    tool_use_id: 'toolu_r', prompt: 'p', description: 'investigate:payments', subagentType: 'general-purpose',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false,
+    workflow: { runId: 'wf_r', agentIndex: 1 },
+  })
+  files[`${dir}/subagents/workflows/wf_r/agent-agent-r1.meta.json`] = meta('investigate:payments')
+  files[`${dir}/subagents/workflows/wf_r/journal.jsonl`] = journal(started('agent-r1'))
+  await step('agent-r1')
+
+  // Twelve quiet minutes on, Claude Code starts the same agent() call again under a new id, with
+  // no agent.spawn: the run's journal names both attempts.
+  await clock.advance(12 * 60_000)
+  files[`${dir}/subagents/workflows/wf_r/agent-agent-x2.meta.json`] = meta('investigate:payments')
+  files[`${dir}/subagents/workflows/wf_r/journal.jsonl`] = journal(started('agent-r1'), started('agent-x2'))
+  await step('agent-x2')
+
+  const viewport = { columns: 110, rows: 60 }
+  const props = { title: 'Workflows', isFocused: false, bodyColumns: 110 }
+  const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor', props, viewport })
+  const mountInspect = () => $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport })
+  const shown = (node: unknown): string => (typeof node === 'string' ? node
+    : ((node as { children?: unknown[] }).children ?? []).map(shown).join(''))
+  const chip = async () => ((await pane.find({ key: 'status-wf_r' }))?.children ?? []).map(shown).filter(Boolean).join(' ')
+
+  // The retry joins the first attempt's card, and that attempt is over; its row says nothing more.
+  expect(await pane.find({ text: /investigate:payments \(retry 1\)/ })).toBeTruthy()
+  expect(await chip()).toBe('● 1 · ⏹ 1')
+  expect(await pane.find({ text: /Ended by Claude Code/ })).toBeFalsy()
+
+  // Its Inspect view says what happened, and so does the retry's.
+  await pane.press({ key: 'gear-agent-r1' })
+  let view = await mountInspect()
+  expect(await view.find({ text: 'Ended by Claude Code after 12m 00s without progress; retried as “investigate:payments (retry 1)”.' })).toBeTruthy()
+  await view.unmount()
+  // Its own end, reported later, changes none of that.
+  await $.turn.complete({ answer: '', durationMs: 1000, isAborted: true, turnId: 't-agent-r1', agentId: 'agent-r1', reason: 'aborted' })
+  view = await mountInspect()
+  expect(await view.find({ text: /after 12m 00s without progress; retried as “investigate:payments \(retry 1\)”/ })).toBeTruthy()
+  await view.unmount()
+  await pane.press({ key: 'gear-agent-x2' })
+  await pane.press({ key: 'activity-agent-x2' })
+  view = await mountInspect()
+  expect(await view.find({ text: 'Started by Claude Code after “investigate:payments” made no progress.' })).toBeTruthy()
+  await view.unmount()
+
+  // A retry of a paused attempt is paused too. That attempt made its request just now, so no quiet
+  // time is told.
+  await pane.press({ key: 'pause-agent-x2' })
+  files[`${dir}/subagents/workflows/wf_r/agent-agent-x3.meta.json`] = meta('investigate:payments')
+  files[`${dir}/subagents/workflows/wf_r/journal.jsonl`] = journal(started('agent-r1'), started('agent-x2'), started('agent-x3'))
+  await step('agent-x3')
+  expect(await pane.find({ text: /investigate:payments \(retry 2\)/ })).toBeTruthy()
+  expect(await chip()).toBe('⏸ 1… · ⏹ 2')
+  await pane.press({ key: 'gear-agent-x2' })
+  view = await mountInspect()
+  expect(await view.find({ text: 'Ended by Claude Code; retried as “investigate:payments (retry 2)”.' })).toBeTruthy()
+  await view.unmount()
+
+  // Its pause still reaches the retry when the stalled attempt's end is reported first.
+  await clock.advance(11 * 60_000)
+  await $.turn.complete({ answer: '', durationMs: 1000, isAborted: true, turnId: 't-agent-x3', agentId: 'agent-x3', reason: 'aborted' })
+  files[`${dir}/subagents/workflows/wf_r/agent-agent-x4.meta.json`] = meta('investigate:payments')
+  files[`${dir}/subagents/workflows/wf_r/journal.jsonl`] = journal(started('agent-r1'), started('agent-x2'), started('agent-x3'), started('agent-x4'))
+  await step('agent-x4')
+  expect(await pane.find({ text: /investigate:payments \(retry 3\)/ })).toBeTruthy()
+  expect(await chip()).toBe('⏸ 1… · ⏹ 3')
+  await pane.press({ key: 'gear-agent-x3' })
+  view = await mountInspect()
+  expect(await view.find({ text: 'Ended by Claude Code after 11m 00s without progress; retried as “investigate:payments (retry 3)”.' })).toBeTruthy()
+  await view.unmount()
+
+  // Agents already running when it loaded join at their next request: a plain subagent, and a
+  // workflow agent whose run it names from the saved script.
+  files[`${dir}/subagents/agent-agent-p1.meta.json`] = JSON.stringify({ agentType: 'Explore', description: 'Map the checkout module', toolUseId: 'toolu_p' })
+  files[`${dir}/subagents/workflows/wf_old/agent-agent-o1.meta.json`] = meta('critique:legacy')
+  files[`${dir}/subagents/workflows/wf_old/journal.jsonl`] = journal(started('agent-o1', 'v2:o1', 'critique:legacy'))
+  files[`${dir}/workflows/scripts/legacy-audit-wf_old.js`] = SCRIPT.replace('store-switch-design', 'legacy-audit')
+  await step('agent-p1')
+  await step('agent-o1')
+  // One it finds nothing about (the engine's own forks) is left be.
+  await step('fork-1')
+  expect(await pane.find({ text: /Map the checkout module/ })).toBeTruthy()
+  expect(await pane.find({ text: /legacy-audit/ })).toBeTruthy()
+  expect(await pane.find({ text: /critique:legacy/ })).toBeTruthy()
+  expect(await pane.find({ text: /fork-1/ })).toBeFalsy()
+
+  // A background subagent started again joins its first attempt too, by the Agent call they share.
+  files[`${dir}/subagents/agent-agent-p2.meta.json`] = JSON.stringify({ agentType: 'Explore', description: 'Map the checkout module', toolUseId: 'toolu_p' })
+  await step('agent-p2')
+  expect(await pane.find({ text: /Map the checkout module \(retry 1\)/ })).toBeTruthy()
+  await pane.unmount()
 })
