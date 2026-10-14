@@ -830,6 +830,26 @@ async function removeAgents($: EngineInterface, ids: string[]) {
 const foldedNow = new Map<string, boolean>()
 const foldGroup = (k: string) => (k.includes('::') ? k.slice(0, k.indexOf('::')) : k)
 
+// The surface regions (`Client`s: the ticking times, a phase header's click) that failed, by
+// key: how many times, and when lately (see the `ui.fault` hook). A desktop runs a mod's regions
+// in one frame and tears it down whole when one of them is slow to draw, each region then
+// showing the fault in its place; it mounts a failed region again only a few times in its life.
+// So each failure draws the region anew under a fresh key, and one that keeps failing (FAULT_MAX
+// times in FAULT_MS) is drawn plain instead until it settles.
+const FAULT_MAX = 3
+const FAULT_MS = 10 * 60_000
+const faults = new Map<string, { n: number; at: number[] }>()
+// A key as drawn after a failure (`<key>~<n>`), to the region's own.
+const redrawnAs = new Map<string, string>()
+const clientKey = (key: string, now: number): string | undefined => {
+  const f = faults.get(key)
+  if (!f) return key
+  if (f.at.filter(t => now - t < FAULT_MS).length >= FAULT_MAX) return undefined
+  const k = `${key}~${f.n}`
+  redrawnAs.set(k, key)
+  return k
+}
+
 // Each Button or Select a pane draws again just as before is handed back as the same element,
 // so it keeps its press handle. Every element built takes a fresh handle, and the host holds one
 // only while the drawing that carried it is the latest: a click landing just after a redraw (a
@@ -1054,6 +1074,17 @@ export const register: Register = on => {
     const k = (e.data as { toggle?: unknown } | null)?.toggle
     if (typeof k === 'string' && k.includes('::') && foldedNow.has(k)) await perform($, `fold-${k}`)
     return {}
+  })
+  // A region that failed on a surface: noted, so the redraw the engine makes next draws it anew
+  // (see clientKey).
+  on('ui.fault', async ($, e, next) => {
+    if (e.requestId === PANE || e.requestId === INSPECT) {
+      const key = redrawnAs.get(e.element) ?? e.element
+      const now = await $.clock.now()
+      const f = faults.get(key)
+      faults.set(key, { n: (f?.n ?? 0) + 1, at: [now, ...(f?.at ?? []).filter(t => now - t < FAULT_MS)] })
+    }
+    return next(e)
   })
 
   on('session.start', async ($, e, next) => {
@@ -1337,7 +1368,8 @@ export const register: Register = on => {
     const idleBy = await read($, idle)
     const ends = await read($, outcomes)
     const lapsed = await read($, quiet)
-    const tick = Math.max(await $.clock.now(), ...list.map(a => a.endedAt ?? a.startedAt), 0)
+    const now = await $.clock.now()
+    const tick = Math.max(now, ...list.map(a => a.endedAt ?? a.startedAt), 0)
     const width = e.props.bodyColumns ?? e.viewport?.columns ?? 100
     // A card's chip: spelled out on wide ("⏸ 1 · ✓ 1"), tight on medium ("⏸1 ✓1"), and on narrow a
     // lead alone keeps no word either ("⏸1", not "⏸ 1 paused").
@@ -1393,11 +1425,15 @@ export const register: Register = on => {
     const squareHex = (r: AgentRow) =>
       r.status === 'running' && ctl[r.id] ? (ctl[r.id] === 'pause' ? PAUSED : STOPPED) : HEX[r.status]
 
-    // An elapsed time: it counts up by itself where the surface runs `Client` regions, so no redraw is needed.
-    const timer = (key: string, ms: number, rate: number, dim = false) =>
-      Client
-        ? <Client key={key} module="./ticker.tsx" props={{ base: ms, rate, ...(dim ? { dim } : {}) }} />
+    // An elapsed time: while it counts, it counts up by itself where the surface runs `Client`
+    // regions, so no redraw is needed; one that stands still is plain text. (Regions can fail on a
+    // surface, see clientKey: the fewer, the less of that.)
+    const timer = (key: string, ms: number, rate: number, dim = false) => {
+      const k = Client && rate > 0 ? clientKey(key, now) : undefined
+      return Client && k
+        ? <Client key={k} module="./ticker.tsx" props={{ base: ms, rate, ...(dim ? { dim } : {}) }} />
         : <Text dimColor={dim}>{duration(ms)}</Text>
+    }
 
     const cell = (w: number, child: unknown, right = false) => (
       <Box width={w} flexShrink={0} justifyContent={right ? 'flex-end' : 'flex-start'}>{child}</Box>
@@ -1613,9 +1649,7 @@ export const register: Register = on => {
         </Text>
       )
       // Between phases, how long since its last agent ended, counting on the surface.
-      const quietFor = s.kind === 'idle' && (Client
-        ? <Client key={`idle-${key}`} module="./ticker.tsx" props={{ base: tick - s.since, rate: 1, dim: true }} />
-        : <Text dimColor>{duration(tick - s.since)}</Text>)
+      const quietFor = s.kind === 'idle' && timer(`idle-${key}`, tick - s.since, 1, true)
       return (
         <Box key={`status-${key}`} flexDirection="row" gap={1} flexShrink={0}>
           {lead}
@@ -1701,8 +1735,12 @@ export const register: Register = on => {
         // On the desktop the whole header takes a click, through a see-through region laid over it
         // (press.tsx), so its name, count and chevron are plain text there: the name flush with the
         // squares under it and the box's left edge, the chevron with its right edge (a plain button
-        // sits a little in from its box).
-        const pressable = started && gui && Client
+        // sits a little in from its box). The region is there only while the pointer is on the
+        // header, all a click needs: a desktop draws a region's fault in its place (see clientKey),
+        // and laid over the header at rest that would cover the phase's name. One that keeps
+        // failing leaves the name, count and chevron as buttons, as elsewhere.
+        const hit = started && gui && Client ? clientKey(`hit-${pk}`, now) : undefined
+        const pressable = Client && hit
         const count = `${done}/${prs.length}`
         return (
           <Box key={`phase-${key}-${p}`} flexDirection="column" marginTop={1}>
@@ -1736,8 +1774,8 @@ export const register: Register = on => {
               </Box>
               {started && progress(`${key}-${p}`, prs)}
               {pressable && (
-                <Box position="absolute" top={0} left={0} right={0} bottom={0}>
-                  <Client key={`hit-${pk}`} module="./press.tsx" props={{ id: pk }} width="100%" height="100%" />
+                <Box position="absolute" top={0} left={0} right={0} bottom={0} display="none" hover={{ display: 'flex' }}>
+                  <Client key={hit} module="./press.tsx" props={{ id: pk }} width="100%" height="100%" />
                 </Box>
               )}
             </Box>
@@ -1979,13 +2017,14 @@ export const register: Register = on => {
     const hex = ctl === 'pause' ? PAUSED : ctl === 'stop' ? STOPPED : RUNNING
     const now = await $.clock.now()
     const worked = (r.pausedSince ?? r.endedAt ?? now) - r.startedAt - (r.pausedTotal ?? 0)
+    const footerKey = Client && isWorking(r, ctls) ? clientKey('footer-time', now) : undefined
     const total = totalTokens(r.usage)
     const totals = `${t.calls === 1 ? '1 tool call' : `${t.calls} tool calls`} · ${total === 1 ? '1 token' : `${tokens(total)} tokens`} · `
     const footer = (
       <Box key="footer" flexDirection="row">
         <Text {...faint}>{totals}</Text>
-        {Client
-          ? <Client key="footer-time" module="./ticker.tsx" props={{ base: worked, rate: isWorking(r, ctls) ? 1 : 0, dim: true }} />
+        {Client && footerKey
+          ? <Client key={footerKey} module="./ticker.tsx" props={{ base: worked, rate: 1, dim: true }} />
           : <Text {...faint}>{duration(worked)}</Text>}
       </Box>
     )

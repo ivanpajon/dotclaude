@@ -254,39 +254,44 @@ test('paused and stopped agents stop counting, and a workflow with none working 
   const props = { title: 'Workflows', isFocused: false, bodyColumns: 110 }
   clock += 10_000
   const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor', props, viewport: { columns: 110, rows: 40 } })
-  const shows = async (key: string, text: string) => expect(await pane.find({ text, in: key })).toBeTruthy()
+  // A time that counts does so on the surface, in a Client; one that stands still is plain text.
+  const counts = async (key: string, text: string) => expect(await pane.find({ text, in: key })).toBeTruthy()
+  const stands = async (key: string, text: string) => {
+    expect(await pane.find({ key })).toBeFalsy()
+    expect(await pane.find({ type: 'Text', text })).toBeTruthy()
+  }
   const wait = async (ms: number) => { await pane.advance(ms); clock += ms }
-  await shows('time-agent-p1', '10s')
-  await shows('span-wf_p', '10s')
+  await counts('time-agent-p1', '10s')
+  await counts('span-wf_p', '10s')
 
   // Paused, agent 1's time stands still; the workflow goes on counting with agent 2.
   await pane.press({ key: 'gear-agent-p1' })
   await pane.press({ key: 'pause-agent-p1' })
   await wait(5000)
-  await shows('time-agent-p1', '10s')
-  await shows('time-agent-p2', '15s')
-  await shows('span-wf_p', '15s')
+  await stands('time-agent-p1', '10s')
+  await counts('time-agent-p2', '15s')
+  await counts('span-wf_p', '15s')
 
   // With agent 2 paused as well, none works: the workflow's time stands still too.
   await pane.press({ key: 'gear-agent-p2' })
   await pane.press({ key: 'pause-agent-p2' })
   await wait(5000)
-  await shows('time-agent-p2', '15s')
-  await shows('span-wf_p', '15s')
+  await stands('time-agent-p2', '15s')
+  await stands('span-wf_p', '15s')
 
   // Resumed, agent 1 and the workflow count on from where they stood.
   await pane.press({ key: 'gear-agent-p1' })
   await pane.press({ key: 'pause-agent-p1' })
   await wait(3000)
-  await shows('time-agent-p1', '13s')
-  await shows('span-wf_p', '18s')
+  await counts('time-agent-p1', '13s')
+  await counts('span-wf_p', '18s')
 
   // Stopped, agent 2 stays at the time it had.
   await pane.press({ key: 'gear-agent-p2' })
   await pane.press({ key: 'stop-agent-p2' })
   await wait(2000)
-  await shows('time-agent-p2', '15s')
-  await shows('span-wf_p', '20s')
+  await stands('time-agent-p2', '15s')
+  await counts('span-wf_p', '20s')
 
   // A stop asked for stands: a later Pause or Resume all leaves agent 2 stopping, not held.
   await pane.press({ key: 'pause-agent-p2' })
@@ -1367,6 +1372,18 @@ phase('Extract')`
   expect(await pane.find({ key: 'head-wf_t-Extract' })).toBeTruthy()
   expect(await pane.find({ key: 'hit-wf_t::Extract' })).toBeTruthy()
   expect(await pane.find({ key: 'head-wf_t-Spec' })).toBeFalsy()
+  // The region that takes the header's click is there only under the pointer: a desktop draws a
+  // Client's fault in its region, which at rest would cover the phase's name.
+  type Node = { key?: string; props?: Record<string, unknown>; hover?: Record<string, unknown>; children?: unknown[] }
+  const around = (n: unknown, key: string): Node | undefined => {
+    const kids = ((n as Node)?.children ?? []) as Node[]
+    return kids.some(c => c?.key === key || c?.props?.key === key) ? n as Node : kids.map(c => around(c, key)).find(Boolean)
+  }
+  const region = around(await pane.drawn(), 'hit-wf_t::Extract')
+  expect(region?.props).toMatchObject({ position: 'absolute', display: 'none' })
+  expect(region?.hover ?? region?.props?.hover).toMatchObject({ display: 'flex' })
+  // Its time counts on the surface while it works.
+  expect(await pane.find({ key: 'time-agent-t1' })).toBeTruthy()
 
   // Its transcript file: the harness's relay of the person's request and a reminder, which aren't
   // its prompt; the computed task, which is (indented by the harness); then its work.
@@ -1438,6 +1455,9 @@ phase('Extract')`
   expect(await view.find({ key: 'stop-agent-t1' })).toBeFalsy()
   expect(await view.find({ text: /…$/ })).toBeFalsy()
   expect(await view.find({ text: /^6 tool calls · / })).toBeTruthy()
+  // A time that no longer counts is plain text, here and in its row: no Client to fault.
+  expect(await view.find({ key: 'footer-time' })).toBeFalsy()
+  expect(await pane.find({ key: 'time-agent-t1' })).toBeFalsy()
 
   // A plain subagent's transcript, which the session hands over: its report handed back through a
   // tool is its answer, and that call counts among its tools.
