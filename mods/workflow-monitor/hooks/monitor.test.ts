@@ -454,6 +454,16 @@ test('finished cards close to Archived, come back, and can be removed for good',
   // Its run's end comes as the Workflow task's notification: the card reads done, and folds.
   await $.prompt.submit({ text: ended('toolu_a', 'completed'), wait: false, origin: { kind: 'task-notification' } })
   expect((await pane.find({ key: 'status-wf_a' }))?.text).toBe('✓ done')
+  // Over, it starts no more agents: its settings keep Archive and Remove alone, with no model or effort
+  // to pick and so no Done; its gear closes them.
+  await pane.press({ key: 'gear-group-wf_a' })
+  expect(await has('archive-wf_a')).toBe(true)
+  expect(await has('done-group-wf_a')).toBe(false)
+  expect(await has('model-group-wf_a')).toBe(false)
+  expect(await has('effort-group-wf_a')).toBe(false)
+  expect(await pane.find({ text: /Model and effort apply/ })).toBeFalsy()
+  await pane.press({ key: 'gear-group-wf_a' })
+  expect(await has('archive-wf_a')).toBe(false)
 
   // Inspecting one of its agents, then removing the card: it leaves the monitor, and Inspect lets go.
   await pane.press({ key: 'fold-wf_a' })
@@ -704,17 +714,31 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   await pane.advance(65_000)
   expect(await pane.find({ text: '1m 05s', in: 'idle-wf_c' })).toBeTruthy()
   expect((await card('wf_c'))?.borderDimColor).toBe(true)
+  // Between phases it may start more agents: its settings, still open from Stop all, can set a model for them.
+  await pane.select({ key: 'model-group-wf_c', value: 'claude-haiku-5-5' })
+  expect(await pane.find({ text: /Model and effort apply to agents it starts later/ })).toBeTruthy()
+  await pane.press({ key: 'done-group-wf_c' })
+  expect(await pane.find({ text: '◆' })).toBeTruthy()
 
   // Its run's notification says it was stopped: that's the lead, the agents it had beside it.
   await notify('toolu_c', 'killed')
   expect(await chipOf(pane, 'wf_c')).toBe('⏹ 3 · ✗ 1 · ✓ 1')
   expect(await atWidths('wf_c')).toEqual(['⏹3 ✗1 ✓1', '⏹3 ✗1 ✓1'])
+  // Over: no pickers, and the model it kept no longer shows ◆.
+  expect(await pane.find({ text: '◆' })).toBeFalsy()
+  await pane.press({ key: 'gear-group-wf_c' })
+  expect(await pane.find({ key: 'model-group-wf_c' })).toBeFalsy()
+  expect(await pane.find({ key: 'archive-wf_c' })).toBeTruthy()
+  expect(await pane.find({ key: 'done-group-wf_c' })).toBeFalsy()
+  await pane.press({ key: 'gear-group-wf_c' })
 
   // Resumed by a new call: how the last call ended no longer holds. The launch names the run, so
   // the new call's end counts though its agents carry no call.
   launches.toolu_c2 = { status: 'async_launched', taskId: 'bg_c2', runId: 'wf_c', workflowName: 'store-switch-design' }
   await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_c2', input: {} })
   expect(await chipOf(pane, 'wf_c')).toBe('○ · ✗ 1 · ⏹ 3 · ✓ 1')
+  // Going again, the model it kept applies again, and shows.
+  expect(await pane.find({ text: '◆' })).toBeTruthy()
   await spawn('', 'wf_c', 6) // agent-c6
   expect(await chipOf(pane, 'wf_c')).toBe('● 1 · ✗ 1 · ⏹ 3 · ✓ 1')
   await end('agent-c6', 'answer')

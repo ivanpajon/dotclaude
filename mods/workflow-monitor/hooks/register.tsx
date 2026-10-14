@@ -1260,15 +1260,18 @@ export const register: Register = on => {
     const controlsRow = (items: ControlItem[], gap = 1) =>
       <Box flexDirection="row" gap={gap} flexWrap="wrap">{items.map(control)}</Box>
 
-    // The panel under a row or a card header: controls first, then the model and effort pickers.
-    const editor = (id: string, current: Override, note: string, actions: ControlItem[] = []) => (
+    // The panel under a row or a card header: controls first, then the model and effort pickers
+    // and Done. With no request left for pickers to apply to, its actions alone: the gear closes it.
+    const editor = (id: string, current: Override, note: string, actions: ControlItem[] = [], pickers = true) => (
       <Box key={`ed-${id}`} flexDirection="column" marginY={1} paddingX={1} borderStyle="round" borderDimColor>
-        {actions.length > 0 && <Box marginBottom={1}>{controlsRow(actions)}</Box>}
-        {controlsRow([
-          picker(`model-${id}`, 'Model', current.model ?? 'inherit', MODEL_OPTIONS),
-          picker(`effort-${id}`, 'Effort', current.effort ?? 'inherit', EFFORT_OPTIONS),
-          button(`done-${id}`, 'Done'),
-        ], 2)}
+        {pickers && actions.length > 0 && <Box marginBottom={1}>{controlsRow(actions)}</Box>}
+        {pickers
+          ? controlsRow([
+            picker(`model-${id}`, 'Model', current.model ?? 'inherit', MODEL_OPTIONS),
+            picker(`effort-${id}`, 'Effort', current.effort ?? 'inherit', EFFORT_OPTIONS),
+            button(`done-${id}`, 'Done'),
+          ], 2)
+          : controlsRow(actions)}
         <Box marginTop={1}><Text color="inactive" italic>{note}</Text></Box>
       </Box>
     )
@@ -1435,8 +1438,12 @@ export const register: Register = on => {
       const isFolded = folded[key] ?? (anyActive ? !active(key) : key !== ordered[0][0])
       foldedNow.set(key, isFolded)
       const groupOpen = open === `group:${key}`
+      // A workflow that has ended (done, failed or stopped) starts no more agents, so a model or
+      // effort is left nothing to apply to; one between phases may still, and plain subagents can
+      // start any time.
+      const tunable = !isWorkflow || isActive(state)
       const go = groups[key] ?? {}
-      const hasGroupOverride = !!(go.model || go.effort)
+      const hasGroupOverride = tunable && !!(go.model || go.effort)
       const running = rows.filter(r => r.status === 'running')
       const anyPaused = running.some(r => ctl[r.id] === 'pause')
       // Running: pause or stop them all. Finished: archive the card (restorable) or remove it.
@@ -1448,7 +1455,7 @@ export const register: Register = on => {
           ? 'Applies to every agent in this workflow from its next request, including agents not started yet. A per-agent setting wins.'
           : 'Applies to every subagent in this group from its next request. A per-agent setting wins.'
         : isWorkflow
-          ? 'Archive (or ✕ on the card) moves it under Archived, where it can be restored; Remove deletes it from the monitor. Model and effort apply to agents it starts later.'
+          ? `Archive (or ✕ on the card) moves it under Archived, where it can be restored; Remove deletes it from the monitor.${tunable ? ' Model and effort apply to agents it starts later.' : ''}`
           : 'Archive (or ✕ on the card) moves them under Archived, where they can be restored; Remove deletes them from the monitor. Model and effort apply to subagents started later.'
 
       // Phases from the label prefix; agents without one go under "Agents".
@@ -1489,7 +1496,7 @@ export const register: Register = on => {
             <Text color="error">{money(sumCost(rows))}</Text>
           </Box>
           {!isFolded && meta?.description && <Text dimColor wrap="wrap">{meta.description}</Text>}
-          {groupOpen && editor(`group-${key}`, go, groupNote, groupActions)}
+          {groupOpen && editor(`group-${key}`, go, groupNote, groupActions, tunable)}
           {!isFolded && phaseOrder.map(p => {
             const prs = phases.get(p)!
             const done = prs.filter(r => r.status !== 'running').length

@@ -90,9 +90,9 @@ On a **running agent's row**, ⚙ opens a panel under it with:
 - **Model** and **Effort** pickers. They apply from the agent's next request.
 - **Inspect**, to open its activity.
 
-On a **card's header**, ⚙ opens the same for the whole group: **Pause all / Resume all**, **Stop all**, and a model and effort for every agent in it, including agents the workflow starts later. An agent's own setting wins over the card's. Once nothing in the card is running, **Archive** and **Remove** take the place of Pause all and Stop all; the model and effort pickers stay, for agents the workflow starts later.
+On a **card's header**, ⚙ opens the same for the whole group: **Pause all / Resume all**, **Stop all**, and a model and effort for every agent in it, including agents the workflow starts later. An agent's own setting wins over the card's. Once nothing in the card is running, **Archive** and **Remove** take the place of Pause all and Stop all. The model and effort pickers stay while the workflow may still start agents (between phases), and on the Subagents card, which new subagents can join at any time. Once a workflow has ended (done, failed or stopped), they are hidden: there is nothing left for them to apply to.
 
-The icon shows **◆** while a model or effort is set, and **▴** while its panel is open.
+The icon shows **◆** while a model or effort is set and can still apply, and **▴** while its panel is open.
 
 ### ↗ Inspect
 
