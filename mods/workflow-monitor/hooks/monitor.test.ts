@@ -117,8 +117,8 @@ test('tracks a workflow agent, applies overrides, and pauses, stops and inspects
     expect(md).toContainEqual(['Checking the detail pages', true])
     expect(md).toContainEqual(['Reading the store page.', false])
     // Each run of tool calls is a line that unfolds to list them, known by its first call: here the
-    // third entry of the stream.
-    const [shut, open] = surface === 'desktop' ? ['›', '⌄'] : ['▸', '▾']
+    // third entry of the stream. Its chevron is the workflows pane's, on every surface.
+    const [shut, open] = ['▸', '▾']
     expect((await view.find({ key: 'steps-agent-2:log-2' }))?.props.label).toBe(`Read a file ${shut}`)
     expect(await view.find({ text: /src\/store\.ts/ })).toBeFalsy()
     await view.press({ key: 'steps-agent-2:log-2' })
@@ -1401,6 +1401,7 @@ phase('Extract')`
     use('u1', 'Bash', { command: 'ls', description: 'List the bundles' }), result('u1'),
     use('u2', 'Bash', { command: 'grep -c x f.js' }), result('u2', true),
     line('assistant', [{ type: 'text', text: 'Found the **strings**.' }]),
+    line('assistant', [{ type: 'text', text: 'Kept in C:/Users/IVANPA~1/a and C:/Users/IVANPA~1/b, ~~not~~ in `~/x`.\n\n```\n~/y\n```' }]),
     use('u3', 'Read', { file_path: 'C:/b/f_01.js' }), result('u3'),
     use('u4', 'Edit', { file_path: 'C:/b/f_01.js', old_string: 'a', new_string: 'b' }), result('u4'),
     use('u5', 'mcp__docs__search_pages', { query: 'transcript' }),
@@ -1413,7 +1414,7 @@ phase('Extract')`
   const view = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport })
   const md = async () => (await view.findAll({ type: 'Markdown' })).map(x => x.props.text as string)
   const label = async (key: string) => (await view.find({ key }))?.props.label
-  expect(await label('steps-agent-t1:u1')).toBe('Ran 2 commands ›')
+  expect(await label('steps-agent-t1:u1')).toBe('Ran 2 commands ▸')
   // The rest of its work, drawn at the next redraw (a press below).
   write(...work)
   // Its model and effort; Pause and Stop while it runs.
@@ -1430,9 +1431,12 @@ phase('Extract')`
   await view.press({ key: 'more-agent-t1' })
   // Each run of tool calls in a line, worded as Claude Code's own (a failed last call said, its run
   // over); its reply between them; files touched alike counted as one; tools of no kind it names last.
-  expect(await label('steps-agent-t1:u1')).toBe('Ran 2 commands (a tool failed) ›')
+  expect(await label('steps-agent-t1:u1')).toBe('Ran 2 commands (a tool failed) ▸')
   expect(await md()).toContain('Found the **strings**.')
-  expect(await label('steps-agent-t1:u3')).toBe('Read and edited f_01.js, used a tool ›')
+  // A lone `~`, as in a Windows short path, is no strikethrough mark: escaped, but not in a pair
+  // or in code, where an escape would show.
+  expect(await md()).toContain('Kept in C:/Users/IVANPA\\~1/a and C:/Users/IVANPA\\~1/b, ~~not~~ in `~/x`.\n\n```\n~/y\n```')
+  expect(await label('steps-agent-t1:u3')).toBe('Read and edited f_01.js, used a tool ▸')
   // Unfolded, a line a call: what it did, to what, and whether it failed.
   await view.press({ key: 'steps-agent-t1:u1' })
   expect(await view.find({ text: /^List the bundles$/ })).toBeTruthy()
@@ -1448,7 +1452,7 @@ phase('Extract')`
   await clock.advance(5000)
   write(...work, result('u5'), use('u6', 'StructuredOutput', { summary: 'ok', strings: ['Show more'] }), result('u6'))
   await $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 't-agent-t1', agentId: 'agent-t1', reason: 'answer' })
-  expect(await label('steps-agent-t1:u3')).toBe('Read and edited f_01.js, used 2 tools ›')
+  expect(await label('steps-agent-t1:u3')).toBe('Read and edited f_01.js, used 2 tools ▸')
   // A field of text read as markdown under its name, anything else as JSON.
   expect((await md()).at(-1)).toBe('**summary**\n\nok\n\n**strings**\n\n```json\n[\n  "Show more"\n]\n```')
   expect(await view.find({ text: '✓ Completed' })).toBeTruthy()
@@ -1471,12 +1475,12 @@ phase('Extract')`
   await pane.press({ key: 'gear-agent-t2' })
   expect(titles.at(-1)).toBe('Review the diff')
   expect(await md()).toEqual(['Review the diff.', 'No **defects** found.'])
-  expect(await label('steps-agent-t2:h1')).toBe('Ran a command, used a tool ›')
+  expect(await label('steps-agent-t2:h1')).toBe('Ran a command, used a tool ▸')
   expect(await view.find({ text: /No result/ })).toBeFalsy()
 
   // Removing the card forgets what was unfolded in its transcripts.
   await view.press({ key: 'steps-agent-t2:h1' })
-  expect(await label('steps-agent-t2:h1')).toBe('Ran a command, used a tool ⌄')
+  expect(await label('steps-agent-t2:h1')).toBe('Ran a command, used a tool ▾')
   await pane.press({ key: 'gear-group-subagents' })
   await pane.press({ key: 'remove-subagents' })
   expect(await view.find({ text: /Pick Inspect/ })).toBeTruthy()

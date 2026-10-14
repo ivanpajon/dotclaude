@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentRow, AgentStatus, AgentUsage, Control, ControlItem, Idle, LogEntry, Override, RunOutcome, WorkflowMeta } from '../types'
-import { activity, fromLog, fromMessages, Reader, step, summary } from './transcript'
+import { activity, fromLog, fromMessages, literalTildes, Reader, step, summary } from './transcript'
 import type { Transcript } from './transcript'
 
 const PANE = 'workflow-monitor'
@@ -187,6 +187,10 @@ function duration(ms: number): string {
   if (m < 60) return `${m}m ${String(s % 60).padStart(2, '0')}s`
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
 }
+
+// A fold's chevron, the same in both panes and on every surface: these two sit level with the
+// text beside them, where a desktop's own `⌄` sits low.
+const chevron = (shut: boolean) => (shut ? '▸' : '▾')
 
 const effortLabel = (e?: string) => EFFORT_OPTIONS.find(o => o.value === e)?.label ?? e ?? '—'
 // The costliest efforts stand out: Max in red, Extra high in orange, a step under it.
@@ -1483,8 +1487,6 @@ export const register: Register = on => {
     const block = gui
       ? { backgroundColor: BLOCK_FILL, paddingX: 1, paddingY: 1, borderStyle: 'single', borderColor: CLEAR }
       : { borderStyle: 'round', borderDimColor: true, paddingX: 1 }
-    // A fold's chevron.
-    const chevron = (shut: boolean) => (shut ? '▸' : '▾')
 
     // The panel under a row or a card header: controls first, then the model and effort pickers
     // and Done. With no request left for pickers to apply to, its actions alone: the gear closes it.
@@ -1962,7 +1964,7 @@ export const register: Register = on => {
     const prompt = t.prompt !== undefined && (
       <Box key="prompt" flexDirection="column" {...bubble}>
         <Box key="prompt-body" flexDirection="column" {...(cut ? { height: gui ? 24 : 12, overflow: 'hidden' as const } : {})}>
-          <Markdown text={t.prompt} />
+          <Markdown text={literalTildes(t.prompt)} />
         </Box>
         {long && <Box marginTop={gui ? 1 : 0}>{control(`more-${id}`, cut ? 'Show more' : 'Show less', true)}</Box>}
       </Box>
@@ -1971,12 +1973,11 @@ export const register: Register = on => {
     // Its replies in order; each run of tool calls between them a line that unfolds to list them,
     // known by its first call (its place would shift as the oldest of a log fall off). A failed
     // last call is said once the run is over.
-    const chevron = (shut: boolean) => (gui ? (shut ? '›' : '⌄') : (shut ? '▸' : '▾'))
     const body = t.entries.map((x, i) => {
       const key = `entry-${i}`
-      if (x.kind === 'text') return <Markdown key={key} text={x.text} />
-      if (x.kind === 'thinking') return <Markdown key={key} text={x.text} dimColor />
-      if (x.kind === 'user') return <Box key={key} flexDirection="column" {...bubble}><Markdown text={x.text} /></Box>
+      if (x.kind === 'text') return <Markdown key={key} text={literalTildes(x.text)} />
+      if (x.kind === 'thinking') return <Markdown key={key} text={literalTildes(x.text)} dimColor />
+      if (x.kind === 'user') return <Box key={key} flexDirection="column" {...bubble}><Markdown text={literalTildes(x.text)} /></Box>
       if (x.kind === 'note') return <Text key={key} color={STOPPED} wrap="wrap">{x.text}</Text>
       const k = `${id}:${x.calls[0]?.id ?? i}`
       const shut = !open[k]
@@ -2008,7 +2009,7 @@ export const register: Register = on => {
     const last = t.entries.at(-1)
     const answered = t.result !== undefined || (r.status === 'done' && last?.kind === 'text' && last.text !== STOP_TEXT)
     const result = t.result !== undefined
-      ? <Markdown key="result" text={t.result} />
+      ? <Markdown key="result" text={literalTildes(t.result)} />
       : over && !answered && <Text key="none" {...faint}>{`No result — task ${r.status === 'failed' ? 'failed' : r.status === 'stopped' ? 'stopped' : 'ended'}`}</Text>
     const empty = t.prompt === undefined && t.entries.length === 0 && !result
 

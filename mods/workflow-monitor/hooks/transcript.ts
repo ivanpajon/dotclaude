@@ -305,3 +305,55 @@ export function activity(t: Transcript): string {
   if (!pending) return 'Thinking…'
   return `${RUNNING[pending.tool] ?? `Using ${words(pending.tool)}`}…`
 }
+
+/**
+ * Markdown with each lone `~` escaped, so it reads as written and not as a strikethrough mark:
+ * Windows short paths have one (`C:/Users/IVANPA~1/...`), and two of them struck out the text
+ * between. `~~struck~~` stays as written, and so does code, where an escape would show.
+ */
+export function literalTildes(md: string): string {
+  if (!md.includes('~')) return md
+  const out: string[] = []
+  let prose: string[] = []
+  let fence: string | undefined
+  const flush = () => { if (prose.length) out.push(outsideCode(prose.join('\n'))); prose = [] }
+  for (const line of md.split('\n')) {
+    if (fence) {
+      out.push(line)
+      const end = /^ {0,3}(`+|~+)\s*$/.exec(line)?.[1]
+      if (end && end[0] === fence[0] && end.length >= fence.length) fence = undefined
+      continue
+    }
+    fence = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1]
+    if (fence) { flush(); out.push(line) } else prose.push(line)
+  }
+  flush()
+  return out.join('\n')
+}
+
+// A lone `~`, escaped; one of a run (`~~`) or escaped already, kept.
+const escapeLone = (s: string) => s.replace(/(^|[^~\\])~(?!~)/g, '$1\\~')
+
+// Text with its lone tildes escaped outside code spans: a run of backticks up to the next run of
+// as many is kept as written; a run with none to close it is plain text.
+function outsideCode(text: string): string {
+  let out = ''
+  let at = 0
+  for (let tick = text.indexOf('`'); tick >= 0; ) {
+    const len = runAt(text, tick)
+    let end = text.indexOf('`', tick + len)
+    while (end >= 0 && runAt(text, end) !== len) end = text.indexOf('`', end + runAt(text, end))
+    if (end < 0) { tick = text.indexOf('`', tick + len); continue }
+    out += escapeLone(text.slice(at, tick)) + text.slice(tick, end + len)
+    at = end + len
+    tick = text.indexOf('`', at)
+  }
+  return out + escapeLone(text.slice(at))
+}
+
+// How many backticks run from `i`.
+function runAt(text: string, i: number): number {
+  let j = i
+  while (text[j] === '`') j++
+  return j - i
+}
