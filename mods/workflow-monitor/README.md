@@ -30,23 +30,23 @@ The pane opens by itself when a subagent starts while none was running, and `/wo
 
 ### Cards
 
-Each workflow run is a card, and so are the plain subagents started with the Agent tool (one **Subagents** card). A card shows:
+Each workflow run is a card, and so are the plain subagents started with the Agent tool (one **Subagents** card). The pane follows the look of Claude Code's own Background tasks panel: cards still going are listed under **Running** and the rest under **Finished**. On the desktop the cards are filled panels with rounded corners and no visible border; in the terminal they keep a rounded border. A card shows:
 
 - **Header:** the workflow's name, its status chip, **⚙** for its settings, and **✕** once none of its agents is running.
 - **Summary:** how long it has been running, how many agents it started, their tokens, and their estimated cost. For a workflow the time is wall-clock time with no agent working left out; for the Subagents card it is the sum of each subagent's working time.
-- **Description and phases:** taken from the workflow script's `export const meta` (`name`, `description`, `phases`). Agents are grouped by the prefix of their label (`investigate:payment-flow` goes under **Investigate**), in the order the script's `phases` declare; a prefix it doesn't declare still gets its own phase, and agents without one go under **Agents**. Each phase shows how many of its agents finished and a progress square per agent.
+- **Description and phases:** taken from the workflow script's `export const meta` (`name`, `description`, `phases`). Agents are grouped by the prefix of their label (`investigate:payment-flow` goes under **Investigate**), in the order the script's `phases` declare; a prefix it doesn't declare still gets its own phase, and agents without one go under **Agents**. Each phase has a header with how many of its agents finished, a small square per agent (grey once done, blue while working, amber while paused, red if it failed, an outline if it was stopped), and a chevron. Click the phase's name, count or chevron to fold or unfold its table of agents; on the desktop, a click anywhere on the header does it. A phase that has agents starts unfolded. On the desktop an unfolded phase header is filled; a folded one shows its fill only while the pointer is on it. While a workflow is still going, the phases its script declares that haven't started any agent yet are listed too, greyed out, with no count.
 - **Agent rows**, described below.
 
-A card stays unfolded while its group is still going: agents working, paused or stopping, or a workflow between phases. Meanwhile, cards that are over fold. The border is blue while an agent works and amber while they are paused. Once no card is still going, only the newest one stays unfolded. Click a card's name to fold or unfold it yourself; your choice then sticks.
+A card stays unfolded while its group is still going: agents working, paused or stopping, or a workflow between phases. Meanwhile, cards that are over fold. In the terminal, the border is blue while an agent works and amber while they are paused. Once no card is still going, only the newest one stays unfolded. Click a card's name to fold or unfold it yourself; your choice then sticks.
 
 ### Agent rows
 
 | Column | Shows |
 |---|---|
-| Status | ● working · ⏸ paused · ⏹ stopped · ✓ done · ✗ failed |
+| Status | ● working · ⏸ paused · ⏹ stopped · ✓ done · ✗ failed. A finished agent's row is dimmed, with a grey ✓ |
 | Agent | The agent's label, cut short with "…" when space runs out |
 | Model | `Opus 5.5`, `Sonnet 5.5`, … |
-| Effort | `Low`, `Medium`, `High`, `Extra high` (in red) |
+| Effort | `Low`, `Medium`, `High`, `Extra high` (in red while the agent runs) |
 | Tokens | Input, output and cache tokens together |
 | Time | Elapsed time, counting live; paused time is left out |
 | Cost | Estimated cost (see [Cost](#cost)) |
@@ -116,7 +116,7 @@ Cost is an estimate from Anthropic's list prices per million tokens (input, outp
 - The monitor keeps its data for the current session only: a new session starts with an empty board.
 - It lists agents that start after it loads. Agents already running when it loaded join at their next model request, and their tokens count from then. It keeps the latest 500 agents and the latest 200 activity entries per agent.
 - When Claude Code starts a stalled agent again, the new attempt joins the same card as `label (retry N)`, and the first attempt shows as stopped. A pause or stop, model or effort set on the first attempt carries over. Claude Code doesn't tell mods about these attempts, so the monitor finds them, and agents running before it loaded, in the session's files.
-- Workflow names, descriptions and phases come from the script's `meta`, read from where the Workflow tool saved it. If the script can't be read, the name and description come from the Workflow tool's launch result (or the script's file name) and the card has no phases. With neither, the card is named after its run id.
+- Workflow names, descriptions and phases come from the script's `meta`, read from where the Workflow tool saved it. If the script can't be read, the name and description come from the Workflow tool's launch result (or the script's file name) and the card has no phases, unless it is a resumed run, which keeps the description and phases its first launch gave. With neither, the card is named after its run id.
 
 ## Development
 

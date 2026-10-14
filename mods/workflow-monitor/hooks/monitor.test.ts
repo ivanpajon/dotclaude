@@ -550,6 +550,8 @@ test('a group can sit on the board and under Archived at once, and starts afresh
 
   // A workflow removed and started again gets a fresh card, without the model it had set.
   await spawn(1, 'wf_r') // agent-s3
+  await pane.press({ key: 'fold-wf_r::Investigate' })
+  expect(await has('cols-wf_r-Investigate')).toBe(false)
   await pane.press({ key: 'gear-group-wf_r' })
   await pane.select({ key: 'model-group-wf_r', value: 'claude-haiku-5-5' })
   await pane.press({ key: 'done-group-wf_r' })
@@ -560,6 +562,7 @@ test('a group can sit on the board and under Archived at once, and starts afresh
   expect(await has('fold-wf_r')).toBe(false)
   await spawn(2, 'wf_r') // agent-s4
   expect(await has('fold-wf_r')).toBe(true)
+  expect(await has('cols-wf_r-Investigate')).toBe(true)
   expect(await pane.find({ text: '◆' })).toBeFalsy()
   await pane.unmount()
 })
@@ -652,6 +655,15 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   const chipOf = async (p: typeof pane, key: string) => ((await p.find({ key: `status-${key}` }))?.children ?? [])
     .map(shown).filter(Boolean).join(' ')
   const card = async (key: string) => (await pane.find({ key: `card-${key}` }))?.props
+  // How a card is framed: filled on the desktop, its corners rounded by a border in no color;
+  // bordered on the terminal.
+  const frame = async (key: string) => {
+    const term = await mount(110, 'terminal')
+    const t = (await term.find({ key: `card-${key}` }))?.props
+    await term.unmount()
+    const d = await card(key)
+    return { fill: d?.backgroundColor, desktopBorder: `${d?.borderStyle} ${d?.borderColor}`, border: t?.borderColor, dim: t?.borderDimColor }
+  }
   // Unfolded: its phase rows are drawn.
   const isOpen = async (key: string) => !!(await pane.find({ key: `cols-${key}-Investigate` }))
   // Medium and narrow, on the terminal while the desktop holds the wide one.
@@ -668,6 +680,112 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   // All working: the lead alone says it in a word, but where there's no room.
   expect(await chipOf(pane, 'wf_c')).toBe('● 5 working')
   expect(await atWidths('wf_c')).toEqual(['● 5 working', '●5'])
+  // Claude Code's own panel look: a "Running" heading, a "Phases" one, and a phase the script
+  // names that started no agent yet, greyed, with no count and nothing to unfold.
+  expect(await pane.find({ key: 'section-Running' })).toBeTruthy()
+  expect(await pane.find({ key: 'section-Finished' })).toBeFalsy()
+  expect(await pane.find({ text: 'Phases' })).toBeTruthy()
+  expect(await pane.find({ key: 'phase-wf_c-Critique' })).toBeTruthy()
+  expect(await pane.find({ key: 'fold-wf_c::Critique' })).toBeFalsy()
+  expect(await pane.find({ key: 'count-wf_c::Critique' })).toBeFalsy()
+  // Faint text is a fixed grey on the desktop, which draws dimColor almost as plain text.
+  expect((await pane.findAll({ text: 'Running' })).some(x => x.type === 'Text' && x.props.color === '#8C929C')).toBe(true)
+  expect((await pane.findAll({ text: 'Critique' })).some(x => x.type === 'Text' && x.props.color === '#8C929C')).toBe(true)
+  // Unfolded, a phase's header is a padded, filled box, its corners rounded less than the card's
+  // (a plain border, not a round one); its count and chevron are plain buttons alike, so they sit
+  // level. The columns' headings are a grey fainter than the values.
+  const head = async () => (await pane.find({ key: 'head-wf_c-Investigate' }))?.props
+  // Its hover, which the drawn tree carries beside the props.
+  type Drawn = { props?: { key?: string }; hover?: unknown; children?: unknown[] }
+  const hoverOf = async (key: string) => {
+    const walk = (n: unknown): Drawn | undefined => ((n as Drawn)?.props?.key === key ? n as Drawn
+      : ((n as Drawn)?.children ?? []).map(walk).find(Boolean))
+    return walk(await pane.drawn())?.hover
+  }
+  expect(await head()).toMatchObject({ backgroundColor: '#8080801f', paddingY: 1, borderStyle: 'single', borderColor: '#00000000' })
+  expect(await hoverOf('head-wf_c-Investigate')).toBeUndefined()
+  expect((await pane.find({ key: 'count-wf_c::Investigate' }))?.props.label).toBe('0/5')
+  expect((await pane.find({ key: 'fold-wf_c::Investigate' }))?.props.label).toBe('\u00a0▾\u00a0')
+  expect((await pane.findAll({ text: 'Tokens' })).some(x => x.type === 'Text' && x.props.color === '#8C929C')).toBe(true)
+  // It folds by its chevron to its header and squares, unfilled until the pointer is on it, and unfolds again.
+  await pane.press({ key: 'fold-wf_c::Investigate' })
+  expect(await isOpen('wf_c')).toBe(false)
+  expect(await pane.find({ key: 'bar-wf_c-Investigate' })).toBeTruthy()
+  expect((await head())?.backgroundColor).toBeUndefined()
+  expect(await hoverOf('head-wf_c-Investigate')).toEqual({ backgroundColor: '#8080801f' })
+  expect((await pane.find({ key: 'fold-wf_c::Investigate' }))?.props.label).toBe('\u00a0▸\u00a0')
+  await pane.press({ key: 'fold-wf_c::Investigate' })
+  expect(await isOpen('wf_c')).toBe(true)
+  // Its count folds it too.
+  await pane.press({ key: 'count-wf_c::Investigate' })
+  expect(await isOpen('wf_c')).toBe(false)
+  await pane.press({ key: 'count-wf_c::Investigate' })
+  expect(await isOpen('wf_c')).toBe(true)
+  // What holds a node: the Box around it.
+  const holderOf = async (p: typeof pane, key: string) => {
+    type Node = { key?: string; props?: Record<string, unknown>; children?: unknown[] }
+    const walk = (n: unknown): Node | undefined => {
+      const kids = ((n as Node)?.children ?? []) as Node[]
+      return kids.some(c => c?.props?.key === key) ? n as Node : kids.map(walk).find(Boolean)
+    }
+    return walk(await p.drawn())?.props
+  }
+  // A click anywhere on the header folds it, through a see-through region laid over the whole
+  // header; so its name is plain text, flush with the squares under it, not a button.
+  const hit = 'hit-wf_c::Investigate'
+  expect(await pane.find({ key: 'phase-wf_c::Investigate' })).toBeFalsy()
+  expect((await pane.findAll({ text: 'Investigate' })).some(x => x.type === 'Text' && x.props.color === undefined)).toBe(true)
+  expect(await holderOf(pane, hit)).toMatchObject({ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 })
+  await pane.resize({ columns: 100, rows: 3, in: hit })
+  const click = async (x: number, y: number, upY = y) => {
+    await pane.pointer({ type: 'down', x, y, button: 'left', in: hit })
+    await pane.pointer({ type: 'up', x, y: upY, button: 'left', in: hit })
+  }
+  await click(60, 2)
+  expect(await isOpen('wf_c')).toBe(false)
+  await click(1, 0)
+  expect(await isOpen('wf_c')).toBe(true)
+  // The header's unfinished last row and column, past the whole cells the region counts, take it too.
+  await click(100, 3)
+  expect(await isOpen('wf_c')).toBe(false)
+  await click(100, 3)
+  expect(await isOpen('wf_c')).toBe(true)
+  // A press dragged off the header (below, past its right edge, left of it), a release with no
+  // press before it, another button, or a post naming no phase drawn or a card does nothing.
+  await click(60, 1, 5)
+  await pane.pointer({ type: 'down', x: 60, y: 1, button: 'left', in: hit })
+  await pane.pointer({ type: 'up', x: 102, y: 1, button: 'left', in: hit })
+  await pane.pointer({ type: 'down', x: 60, y: 1, button: 'left', in: hit })
+  await pane.pointer({ type: 'up', x: -1, y: 1, button: 'left', in: hit })
+  await pane.pointer({ type: 'up', x: 3, y: 1, button: 'left', in: hit })
+  await pane.pointer({ type: 'down', x: 3, y: 1, button: 'right', in: hit })
+  await pane.pointer({ type: 'up', x: 3, y: 1, button: 'right', in: hit })
+  await pane.post({ toggle: 'wf_c::Nope' }, { in: hit })
+  await pane.post({ toggle: 'wf_c' }, { in: hit })
+  // (The card's own key would fold the card, its phases with it.)
+  expect(await isOpen('wf_c')).toBe(true)
+  // The table sits a little below its header.
+  expect(await holderOf(pane, 'cols-wf_c-Investigate')).toMatchObject({ marginTop: 1 })
+  // The chevron sits centred in the row buttons' column, on either surface.
+  expect(await holderOf(pane, 'fold-wf_c::Investigate')).toMatchObject({ width: 6, justifyContent: 'center' })
+  expect(await holderOf(pane, 'gear-agent-c1')).toMatchObject({ width: 6, justifyContent: 'center' })
+  // On the terminal: no fill, padding or border on the header, the headings dim, and the chevron in
+  // the three-cell column of the rows' buttons.
+  const plain = await mount(110, 'terminal')
+  const plainHead = (await plain.find({ key: 'head-wf_c-Investigate' }))?.props
+  expect(plainHead).toBeTruthy()
+  expect([plainHead?.backgroundColor, plainHead?.borderStyle, plainHead?.paddingY]).toEqual([undefined, undefined, undefined])
+  expect((await plain.findAll({ text: 'Tokens' })).some(x => x.type === 'Text' && x.props.dimColor)).toBe(true)
+  expect(await holderOf(plain, 'fold-wf_c::Investigate')).toMatchObject({ width: 3, justifyContent: 'center' })
+  // There the name is the button that folds it, no region lies over the header, and the table
+  // follows it straight away.
+  expect(await plain.find({ key: hit })).toBeFalsy()
+  expect(await holderOf(plain, 'cols-wf_c-Investigate')).toMatchObject({ marginTop: 0 })
+  await plain.press({ key: 'phase-wf_c::Investigate' })
+  expect(await isOpen('wf_c')).toBe(false)
+  await plain.press({ key: 'phase-wf_c::Investigate' })
+  expect(await isOpen('wf_c')).toBe(true)
+  await plain.unmount()
 
   // agent-c1..c5: two still working, one done, one failed, one stopped.
   await end('agent-c2', 'answer')
@@ -677,14 +795,21 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   // Working: the lead counts the working, then a mark for each other kind, at any width; the border is blue.
   expect(await chipOf(pane, 'wf_c')).toBe('● 2 · ✗ 1 · ⏹ 1 · ✓ 1')
   expect(await atWidths('wf_c')).toEqual(['●2 ✗1 ⏹1 ✓1', '●2 ✗1 ⏹1 ✓1'])
-  expect((await card('wf_c'))?.borderColor).toBe('#4D9DF0')
+  expect(await frame('wf_c')).toEqual({ fill: '#80808014', desktopBorder: 'round #00000000', border: '#4D9DF0', dim: false })
+  // A finished agent is grey, a done one's check too; a stopped one's square is an outline.
+  expect((await pane.findAll({ text: '✓' })).some(x => x.type === 'Text' && x.props.color === '#8C929C')).toBe(true)
+  expect((await pane.findAll({ text: 'investigate:part-2' })).some(x => x.type === 'Text' && x.props.dimColor)).toBe(true)
+  expect(JSON.stringify((await pane.find({ key: 'bar-wf_c-Investigate' }))?.children ?? [])).toContain('fill=\\"none\\"')
+  const term = await mount(110, 'terminal')
+  expect(await term.find({ text: '□' })).toBeTruthy()
+  await term.unmount()
 
   // Pausing them all: amber, and "…" until each is held at its next tool call.
   await pane.press({ key: 'gear-group-wf_c' })
   await pane.press({ key: 'pause-all-wf_c' })
   expect(await chipOf(pane, 'wf_c')).toBe('⏸ 2… · ✗ 1 · ⏹ 1 · ✓ 1')
   expect(await atWidths('wf_c')).toEqual(['⏸2… ✗1 ⏹1 ✓1', '⏸2… ✗1 ⏹1 ✓1'])
-  expect((await card('wf_c'))?.borderColor).toBe('warning')
+  expect(await frame('wf_c')).toEqual({ fill: '#80808014', desktopBorder: 'round #00000000', border: 'warning', dim: false })
   const held1 = request('agent-c1')
   const held5 = request('agent-c5')
   await clock.settle()
@@ -713,7 +838,7 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   expect(await pane.find({ text: '0s', in: 'idle-wf_c' })).toBeTruthy()
   await pane.advance(65_000)
   expect(await pane.find({ text: '1m 05s', in: 'idle-wf_c' })).toBeTruthy()
-  expect((await card('wf_c'))?.borderDimColor).toBe(true)
+  expect(await frame('wf_c')).toEqual({ fill: '#80808014', desktopBorder: 'round #00000000', border: undefined, dim: true })
   // Between phases it may start more agents: its settings, still open from Stop all, can set a model for them.
   await pane.select({ key: 'model-group-wf_c', value: 'claude-haiku-5-5' })
   expect(await pane.find({ text: /Model and effort apply to agents it starts later/ })).toBeTruthy()
@@ -731,14 +856,17 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   expect(await pane.find({ key: 'archive-wf_c' })).toBeTruthy()
   expect(await pane.find({ key: 'done-group-wf_c' })).toBeFalsy()
   await pane.press({ key: 'gear-group-wf_c' })
+  // Nor a phase still to come: it won't.
+  expect(await pane.find({ key: 'phase-wf_c-Critique' })).toBeFalsy()
 
   // Resumed by a new call: how the last call ended no longer holds. The launch names the run, so
   // the new call's end counts though its agents carry no call.
   launches.toolu_c2 = { status: 'async_launched', taskId: 'bg_c2', runId: 'wf_c', workflowName: 'store-switch-design' }
   await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_c2', input: {} })
   expect(await chipOf(pane, 'wf_c')).toBe('○ · ✗ 1 · ⏹ 3 · ✓ 1')
-  // Going again, the model it kept applies again, and shows.
+  // Going again, the model it kept applies again, and shows, and so does the phase still to come.
   expect(await pane.find({ text: '◆' })).toBeTruthy()
+  expect(await pane.find({ key: 'phase-wf_c-Critique' })).toBeTruthy()
   await spawn('', 'wf_c', 6) // agent-c6
   expect(await chipOf(pane, 'wf_c')).toBe('● 1 · ✗ 1 · ⏹ 3 · ✓ 1')
   await end('agent-c6', 'answer')
@@ -775,7 +903,9 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   expect(await chipOf(pane, 'wf_g')).toBe('✗ 1 failed')
   expect(await chipOf(pane, 'wf_h')).toBe('⏹ stopped')
   expect(await atWidths('wf_g')).toEqual(['✗ 1 failed', '✗1'])
-  // With every card over, only the newest is unfolded.
+  // With every card over, only the newest is unfolded, all of them under "Finished".
+  expect(await pane.find({ key: 'section-Running' })).toBeFalsy()
+  expect(await pane.find({ key: 'section-Finished' })).toBeTruthy()
   expect(await isOpen('wf_h')).toBe(true)
   expect(await isOpen('wf_f')).toBe(false)
 
@@ -841,7 +971,7 @@ test('agent rows hide no column at any width, cutting the name short, then go on
       // Column form: every header; two lines: none of them.
       columns: headers.every(Boolean) ? true : headers.some(Boolean) ? 'some' : false,
       effort: (await pane.findAll({ text: 'Extra high' })).some(x => x.type === 'Text' && x.props.color === 'error'),
-      // Each agent's own cost, dim (the card's total is red).
+      // Each agent's own cost, dim (the card's total is bold).
       cost: (await pane.findAll({ text: /^\$\d/ })).some(x => x.type === 'Text' && x.props.dimColor),
       // The agent's name ends in an ellipsis where its column is short, rather than wrapping.
       cut: (await pane.findAll({ text: /^design:api-contract/ })).some(x => x.type === 'Text' && x.props.wrap === 'truncate-end'),

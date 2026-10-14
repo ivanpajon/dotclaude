@@ -93,20 +93,36 @@ const RUNNING = '#4D9DF0'
 const STOPPED = '#8C929C'
 const PAUSED = '#E5A50A'
 
+// Done is a quiet grey check, as Claude Code's own panel draws a finished agent: color is for
+// what still goes on, or went wrong. The stopped grey, a fixed one: the desktop draws the
+// 'inactive' theme key almost as plain text.
 const GLYPH: Record<AgentStatus, [string, string]> = {
   running: ['●', RUNNING],
-  done: ['✓', 'success'],
+  done: ['✓', STOPPED],
   failed: ['✗', 'error'],
   stopped: ['⏹', STOPPED],
 }
 
-// The same status colors as raw hex, for SVG (theme keys don't reach inside it).
+// The same status colors as raw hex, for SVG (theme keys don't reach inside it). A done square is
+// this grey half-faded; a stopped one its outline (see progress).
 const HEX: Record<AgentStatus, string> = {
   running: RUNNING,
-  done: '#4EBA65',
+  done: STOPPED,
   failed: '#E5484D',
   stopped: STOPPED,
 }
+
+// Fills, where the surface paints them (the terminal keeps its borders instead): a card, and on
+// it a phase's header or a settings panel, a step darker. Grey at a low alpha reads on light and
+// dark themes alike.
+const CARD_FILL = '#80808014'
+const BLOCK_FILL = '#8080801f'
+// No color at all: a border drawn in it rounds a box's corners and shows nothing else.
+const CLEAR = '#00000000'
+// Faint text on those surfaces (column headings, section headings, phases not started yet): a
+// mid grey, fainter than the values on either theme. The desktop draws `dimColor` too close to
+// plain text to tell them apart.
+const HEADING = '#8C929C'
 
 // An agent's icon and colour. One asked to pause or stop shows it while it still runs.
 function look(r: AgentRow, c: Control | undefined): [string, string] {
@@ -120,7 +136,9 @@ function look(r: AgentRow, c: Control | undefined): [string, string] {
 // is three cells; a surface that draws native buttons adds its own chrome round it, which a
 // three-cell column cuts down to "…", so it gets `nativeGear`.
 const W = { glyph: 2, model: 10, effort: 10, tokens: 7, time: 7, cost: 7, gear: 3, nativeGear: 6 }
-// A card's border and padding, both sides together.
+// What a card takes from each agent row's width, both sides together: its border and padding on
+// the terminal; filled, its padding and that of the phase's table, which lines up with the
+// phase's header.
 const CARD_X = 4
 // The fewest columns an agent's name gets in a row of columns ("investigate…"); less, and each
 // agent goes on two lines instead.
@@ -236,7 +254,13 @@ async function noteLaunch($: EngineInterface, toolUseId: string, input: { script
   await noteSessionDir($, launch?.scriptPath)
   const script = input.script ?? (path ? await $.fs.read(path).catch(() => undefined) : undefined)
   const name = input.name ?? launch?.workflowName ?? path?.split(/[\\/]/).pop()?.replace(/\.[a-z]+$/, '')
-  const meta = (typeof script === 'string' && parseMeta(script)) || (name ? { name, description: launch?.summary, phases: [] } : undefined)
+  // With no script to read, a resume keeps the description and phases its first launch gave
+  // (kept by the run, or by the call its agents carry).
+  const known = await read($, workflows)
+  const byAgents = run ? (await read($, agents)).filter(a => a.runId === run).map(a => known[a.toolUseId]).find(Boolean) : undefined
+  const before = known[run ?? toolUseId] ?? byAgents
+  const meta = (typeof script === 'string' && parseMeta(script))
+    || (name ? { name, description: launch?.summary ?? before?.description, phases: before?.phases ?? [] } : undefined)
   if (meta) await update($, workflows, all => ({ ...all, [run ?? toolUseId]: meta }))
   if (!run) return
   await update($, calls, all => ({ ...all, [toolUseId]: run }))
@@ -677,7 +701,8 @@ async function removeAgents($: EngineInterface, ids: string[]) {
   const emptied = new Set(groups.filter(g => !list.some(a => groupKey(a) === g)))
   if (emptied.size) {
     await update($, idle, all => without(all, emptied))
-    await update($, collapsed, all => without(all, emptied))
+    // Its card's fold and those of its phases.
+    await update($, collapsed, all => Object.fromEntries(Object.entries(all).filter(([k]) => !emptied.has(foldGroup(k)))))
     // Its model and effort too: with no card left to show them, they'd apply unseen.
     await update($, groupOverrides, all => without(all, emptied))
     // And what the monitor knew of the run: its name, how it ended, whether it went quiet, its calls.
@@ -686,11 +711,13 @@ async function removeAgents($: EngineInterface, ids: string[]) {
     await update($, quiet, all => without(all, emptied))
     await update($, calls, all => Object.fromEntries(Object.entries(all).filter(([, run]) => !emptied.has(run))))
   }
-  for (const g of emptied) foldedNow.delete(g)
+  for (const k of foldedNow.keys()) if (emptied.has(foldGroup(k))) foldedNow.delete(k)
 }
 
-// Which cards the person last saw folded, by group key, as the pane drew them.
+// Which cards the person last saw folded, as the pane drew them: by group key, and a phase on
+// one by `<group>::<phase>`.
 const foldedNow = new Map<string, boolean>()
+const foldGroup = (k: string) => (k.includes('::') ? k.slice(0, k.indexOf('::')) : k)
 
 // Each Button or Select a pane draws again just as before is handed back as the same element,
 // so it keeps its press handle. Every element built takes a fresh handle, and the host holds one
@@ -747,7 +774,12 @@ async function perform($: EngineInterface, key: string, value?: string) {
   else if (key.startsWith('remove-')) await removeAgents($, closable(rest('remove-')))
   else if (key.startsWith('restore-')) await restoreAgents($, stored(rest('restore-')))
   else if (key.startsWith('purge-')) await removeAgents($, stored(rest('purge-')))
-  else if (key.startsWith('fold-'))await update($, collapsed, all => ({ ...all, [rest('fold-')]: !(foldedNow.get(rest('fold-')) ?? false) }))
+  // A card's name (`fold-<group>`); a phase's chevron (`fold-<group>::<phase>`), name
+  // (`phase-<group>::<phase>`) or count (`count-<group>::<phase>`).
+  else if (key.startsWith('fold-') || key.startsWith('phase-') || key.startsWith('count-')) {
+    const k = key.slice(key.indexOf('-') + 1)
+    await update($, collapsed, all => ({ ...all, [k]: !(foldedNow.get(k) ?? false) }))
+  }
   else if (key.startsWith('gear-group-')) await toggleEditor(`group:${rest('gear-group-')}`)
   else if (key.startsWith('gear-')) agent(rest('gear-'))?.status === 'running' ? await toggleEditor(`agent:${rest('gear-')}`) : await inspect(rest('gear-'))
   else if (key.startsWith('pause-all-')) {
@@ -882,6 +914,15 @@ export const register: Register = on => {
     if (e.requestId !== PANE && e.requestId !== INSPECT) return next(e)
     await perform($, e.element, e.value)
     return { element: e.element, value: e.value }
+  })
+
+  // A click on a phase's header, through its press region (press.tsx): fold or unfold the phase,
+  // as its chevron does. A phase the pane draws, and nothing else: the post is the region's code.
+  on('ui.message', async ($, e, next) => {
+    if (e.requestId !== PANE || !e.element.startsWith('hit-')) return next(e)
+    const k = (e.data as { toggle?: unknown } | null)?.toggle
+    if (typeof k === 'string' && k.includes('::') && foldedNow.has(k)) await perform($, `fold-${k}`)
+    return {}
   })
 
   on('session.start', async ($, e, next) => {
@@ -1167,7 +1208,9 @@ export const register: Register = on => {
     const wide = layout === 'wide'
     // Agent rows hide no column at any width: the agent's name is cut short instead, and once that
     // leaves it under LABEL_MIN, each agent goes on two lines, every column's value on the second.
-    const gearW = e.surface === 'terminal' ? W.gear : W.nativeGear
+    // A surface that paints fills draws Claude Code's own panel look: filled cards, no borders.
+    const gui = e.surface !== 'terminal'
+    const gearW = gui ? W.nativeGear : W.gear
     const beside = CARD_X + [W.glyph, W.model, W.effort, W.tokens, W.time, W.cost, gearW].reduce((sum, w) => sum + w + 1, 0)
     const inline = width - beside < LABEL_MIN
 
@@ -1214,10 +1257,10 @@ export const register: Register = on => {
       r.status === 'running' && ctl[r.id] ? (ctl[r.id] === 'pause' ? PAUSED : STOPPED) : HEX[r.status]
 
     // An elapsed time: it counts up by itself where the surface runs `Client` regions, so no redraw is needed.
-    const timer = (key: string, ms: number, rate: number) =>
+    const timer = (key: string, ms: number, rate: number, dim = false) =>
       Client
-        ? <Client key={key} module="./ticker.tsx" props={{ base: ms, rate }} />
-        : <Text>{duration(ms)}</Text>
+        ? <Client key={key} module="./ticker.tsx" props={{ base: ms, rate, ...(dim ? { dim } : {}) }} />
+        : <Text dimColor={dim}>{duration(ms)}</Text>
 
     const cell = (w: number, child: unknown, right = false) => (
       <Box width={w} flexShrink={0} justifyContent={right ? 'flex-end' : 'flex-start'}>{child}</Box>
@@ -1231,15 +1274,18 @@ export const register: Register = on => {
       <Box width={gearW} flexShrink={0} justifyContent="center" alignItems="center">{child}</Box>
     )
 
+    // Faint text (see HEADING): a fixed grey where the surface paints its own type, dim on the terminal.
+    const faint = gui ? { color: HEADING } : { dimColor: true }
+    const heading = (text: string) => <Text {...faint}>{text}</Text>
     const columns = (key: string) => (
       <Box key={key} flexDirection="row" gap={1}>
         {cell(W.glyph, <Text> </Text>)}
-        <Box flexGrow={1} flexShrink={1} minWidth={0}><Text dimColor>Agent</Text></Box>
-        {cell(W.model, <Text dimColor>Model</Text>)}
-        {cell(W.effort, <Text dimColor>Effort</Text>)}
-        {cell(W.tokens, <Text dimColor>Tokens</Text>, true)}
-        {cell(W.time, <Text dimColor>Time</Text>, true)}
-        {cell(W.cost, <Text dimColor>Cost</Text>, true)}
+        <Box flexGrow={1} flexShrink={1} minWidth={0}>{heading('Agent')}</Box>
+        {cell(W.model, heading('Model'))}
+        {cell(W.effort, heading('Effort'))}
+        {cell(W.tokens, heading('Tokens'), true)}
+        {cell(W.time, heading('Time'), true)}
+        {cell(W.cost, heading('Cost'), true)}
         {gearCell(<Text> </Text>)}
       </Box>
     )
@@ -1247,7 +1293,7 @@ export const register: Register = on => {
     // The surface's own Buttons and Selects, each kept while it draws the same (see keeper), so a
     // click that lands while the pane redraws still counts. Presses and picks run in the hooks.
     const keep = keeper(`${e.surface}:${PANE}`)
-    const button = (key: string, label: string, look: { plain?: boolean; prefix?: string; bold?: boolean } = {}): ControlItem =>
+    const button = (key: string, label: string, look: { plain?: boolean; prefix?: string; bold?: boolean; dim?: boolean } = {}): ControlItem =>
       ({ kind: 'button', key, label, ...look })
     const picker = (key: string, label: string, value: string, options: { value: string; label: string }[]): ControlItem =>
       ({ kind: 'select', key, label, value, options })
@@ -1255,15 +1301,22 @@ export const register: Register = on => {
       c.kind === 'select'
         ? <Select key={c.key} label={c.label} options={c.options} value={c.value} onSelect={byHook} />
         : c.prefix !== undefined || c.bold
-          ? <Button key={c.key} plain={c.plain} onPress={byHook}>{c.prefix ?? ''}<Text bold={c.bold}>{c.label}</Text></Button>
-          : <Button key={c.key} plain={c.plain} label={c.label} onPress={byHook} />)
+          ? <Button key={c.key} plain={c.plain} dimColor={c.dim} onPress={byHook}>{c.prefix ?? ''}<Text bold={c.bold}>{c.label}</Text></Button>
+          : <Button key={c.key} plain={c.plain} dimColor={c.dim} label={c.label} onPress={byHook} />)
     const controlsRow = (items: ControlItem[], gap = 1) =>
       <Box flexDirection="row" gap={gap} flexWrap="wrap">{items.map(control)}</Box>
+    // Where a block sits on a card: filled, or bordered on the terminal. Its corners are the
+    // surface's plain radius (any border but a round one, drawn in no color), a step under the card's.
+    const block = gui
+      ? { backgroundColor: BLOCK_FILL, paddingX: 1, paddingY: 1, borderStyle: 'single', borderColor: CLEAR }
+      : { borderStyle: 'round', borderDimColor: true, paddingX: 1 }
+    // A fold's chevron.
+    const chevron = (shut: boolean) => (shut ? '▸' : '▾')
 
     // The panel under a row or a card header: controls first, then the model and effort pickers
     // and Done. With no request left for pickers to apply to, its actions alone: the gear closes it.
     const editor = (id: string, current: Override, note: string, actions: ControlItem[] = [], pickers = true) => (
-      <Box key={`ed-${id}`} flexDirection="column" marginY={1} paddingX={1} borderStyle="round" borderDimColor>
+      <Box key={`ed-${id}`} flexDirection="column" marginY={1} {...block}>
         {pickers && actions.length > 0 && <Box marginBottom={1}>{controlsRow(actions)}</Box>}
         {pickers
           ? controlsRow([
@@ -1287,11 +1340,15 @@ export const register: Register = on => {
       // activity (perform() tells them apart). Padded with no-break spaces, which no surface trims: a
       // wider target than the glyph alone, in a column wide enough for it (see gearCell).
       const icon = r.status !== 'running' ? '↗' : isOpen ? '▴' : hasOverride ? '◆' : '⚙'
-      const gear = control(button(`gear-${r.id}`, ` ${icon} `, { plain: true }))
+      // A finished agent is drawn grey throughout, its icon aside, as Claude Code's own panel does.
+      const over = r.status !== 'running'
+      const gear = control(button(`gear-${r.id}`, ` ${icon} `, { plain: true, dim: over }))
       // The icon says paused or stopped; after the label, only that it's still on its way there.
       const state = paused ? (holding[r.id] ? '' : ' · pausing…') : stopping ? ' · stopping…' : ''
-      const label = <Text wrap="truncate-end" dimColor={r.status !== 'running'}>{r.label}<Text color={color}>{state}</Text></Text>
-      const time = timer(`time-${r.id}`, worked(r), working(r) ? 1 : 0)
+      const label = <Text wrap="truncate-end" dimColor={over}>{r.label}<Text color={color}>{state}</Text></Text>
+      const time = timer(`time-${r.id}`, worked(r), working(r) ? 1 : 0, over)
+      // The costliest effort stands out in red while it still spends.
+      const effortHue = accent ?? (over ? undefined : effortColor(r.effort))
       // Pause and Stop while it runs (a panel left open when it finishes keeps only Inspect).
       const settings = isOpen && editor(
         r.id,
@@ -1317,9 +1374,9 @@ export const register: Register = on => {
               {gearCell(gear)}
             </Box>
             <Box flexDirection="row" flexWrap="wrap" columnGap={2} marginLeft={W.glyph + 1}>
-              <Text color={accent}>{shortModel(r.model)}</Text>
-              <Text color={accent ?? effortColor(r.effort)} dimColor={!accent && !effortColor(r.effort)}>{effortLabel(r.effort)}</Text>
-              <Text>{tokens(totalTokens(r.usage))}<Text dimColor> tok</Text></Text>
+              <Text color={accent} dimColor={over}>{shortModel(r.model)}</Text>
+              <Text color={effortHue} dimColor={over || !effortHue}>{effortLabel(r.effort)}</Text>
+              <Text dimColor={over}>{tokens(totalTokens(r.usage))}<Text dimColor> tok</Text></Text>
               {time}
               <Text dimColor>{money(costOf(r.model, r.usage))}</Text>
             </Box>
@@ -1334,9 +1391,9 @@ export const register: Register = on => {
           <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
             {label}
           </Box>
-          {cell(W.model, <Text wrap="truncate-end" color={r.isOverridden ? 'merged' : undefined}>{shortModel(r.model)}</Text>)}
-          {cell(W.effort, <Text color={r.isOverridden ? 'merged' : effortColor(r.effort)}>{effortLabel(r.effort)}</Text>)}
-          {cell(W.tokens, <Text>{tokens(totalTokens(r.usage))}</Text>, true)}
+          {cell(W.model, <Text wrap="truncate-end" color={accent} dimColor={over}>{shortModel(r.model)}</Text>)}
+          {cell(W.effort, <Text color={effortHue} dimColor={over}>{effortLabel(r.effort)}</Text>)}
+          {cell(W.tokens, <Text dimColor={over}>{tokens(totalTokens(r.usage))}</Text>, true)}
           {cell(W.time, time, true)}
           {cell(W.cost, <Text dimColor>{money(costOf(r.model, r.usage))}</Text>, true)}
           {gearCell(gear)}
@@ -1345,17 +1402,26 @@ export const register: Register = on => {
       ].filter(Boolean)
     }
 
-    // Rounded squares where the surface draws SVG (desktop); block glyphs elsewhere.
+    // A stopped agent's square, or one on its way there, is an outline: it ended without finishing.
+    const hollow = (r: AgentRow) => r.status === 'stopped' || (r.status === 'running' && ctl[r.id] === 'stop')
+
+    // Small rounded squares where the surface draws SVG (desktop); block glyphs elsewhere.
     const progress = (key: string, rows: AgentRow[]) => {
       if (e.surface === 'desktop') {
-        // `pad` px of air above and below the squares, inside the drawing: finer than a row margin.
-        const size = 10, step = 14, pad = 5
-        const perRow = Math.max(1, Math.floor(((width - 4) * 6) / step))
+        // px of air above and below the squares, inside the drawing: finer than a row margin. Little
+        // below, where the phase header's own padding follows.
+        const size = 8, step = 11, padTop = 4, padBottom = 1
+        const perRow = Math.max(1, Math.floor(((width - CARD_X - 2) * 6) / step))
         const lines = Math.ceil(rows.length / perRow)
-        const rects = rows.map((r, i) =>
-          `<rect x="${(i % perRow) * step}" y="${pad + Math.floor(i / perRow) * step}" width="${size}" height="${size}" rx="3" fill="${squareHex(r)}"/>`).join('')
+        const rects = rows.map((r, i) => {
+          const x = (i % perRow) * step, y = padTop + Math.floor(i / perRow) * step
+          // An outline sits inside the square's bounds, half its stroke in from each edge.
+          return hollow(r)
+            ? `<rect x="${x + 0.75}" y="${y + 0.75}" width="${size - 1.5}" height="${size - 1.5}" rx="2" fill="none" stroke="${STOPPED}" stroke-width="1.5"/>`
+            : `<rect x="${x}" y="${y}" width="${size}" height="${size}" rx="2" fill="${squareHex(r)}"${r.status === 'done' ? ' fill-opacity="0.6"' : ''}/>`
+        }).join('')
         const w = Math.max(size, Math.min(rows.length, perRow) * step - (step - size))
-        const barHeight = lines * step - (step - size) + pad * 2
+        const barHeight = lines * step - (step - size) + padTop + padBottom
         const { Svg } = $.ui.resolve(e)
         return (
           <Box key={`bar-${key}`} marginY={0}>
@@ -1368,7 +1434,7 @@ export const register: Register = on => {
           </Box>
         )
       }
-      return <Text key={`bar-${key}`}>{rows.map(r => <Text color={look(r, ctl[r.id])[1]}>■</Text>)}</Text>
+      return <Text key={`bar-${key}`}>{rows.map(r => <Text color={look(r, ctl[r.id])[1]}>{hollow(r) ? '□' : '■'}</Text>)}</Text>
     }
 
     // A card's status chip (see groupState): a lead for where the group stands, then a mark for each
@@ -1458,27 +1524,95 @@ export const register: Register = on => {
           ? `Archive (or ✕ on the card) moves it under Archived, where it can be restored; Remove deletes it from the monitor.${tunable ? ' Model and effort apply to agents it starts later.' : ''}`
           : 'Archive (or ✕ on the card) moves them under Archived, where they can be restored; Remove deletes them from the monitor. Model and effort apply to subagents started later.'
 
-      // Phases from the label prefix; agents without one go under "Agents".
+      // Phases from the label prefix; agents without one go under "Agents". While the run goes on,
+      // the phases its script names that started no agent yet are listed too, greyed and folded.
       const phases = new Map<string, AgentRow[]>()
       for (const r of [...rows].sort((a, b) => (a.index ?? a.startedAt) - (b.index ?? b.startedAt))) {
         const p = (isWorkflow && phaseOf(r.label, meta?.phases ?? [])) || 'Agents'
         phases.set(p, [...(phases.get(p) ?? []), r])
       }
-      const phaseOrder = [...phases.keys()].sort((a, b) => {
-        const order = meta?.phases ?? []
-        const ia = order.indexOf(a), ib = order.indexOf(b)
+      const planned = isWorkflow ? meta?.phases ?? [] : []
+      const upcoming = isActive(state) ? planned.filter(p => !phases.has(p)) : []
+      const phaseOrder = [...phases.keys(), ...upcoming].sort((a, b) => {
+        const ia = planned.indexOf(a), ib = planned.indexOf(b)
         return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib)
       })
+      const hasPhases = isWorkflow && (planned.length > 0 || phaseOrder.some(p => p !== 'Agents'))
+
+      // A phase: its header (name, how many of its agents finished, the fold), its squares, and
+      // below them its table. Unfolded once it has agents, until folded by hand; its name and its
+      // count fold it too.
+      const phaseBlock = (p: string) => {
+        const prs = phases.get(p) ?? []
+        const pk = `${key}::${p}`
+        const started = prs.length > 0
+        const shut = !started || (folded[pk] ?? false)
+        if (started) foldedNow.set(pk, shut)
+        const done = prs.filter(r => r.status !== 'running').length
+        // Where the surface paints fills, a padded box with rounded corners (see block): filled
+        // while unfolded; folded, the card's own until the pointer is on it.
+        const head = gui
+          ? {
+            paddingX: 1, paddingY: 1, borderStyle: 'single', borderColor: CLEAR,
+            ...(shut ? {} : { backgroundColor: BLOCK_FILL }),
+            ...(started && shut ? { hover: { backgroundColor: BLOCK_FILL } } : {}),
+          }
+          : {}
+        // On the desktop the whole header takes a click, through a see-through region laid over it
+        // (press.tsx), so the name is plain text there, flush with the squares under it: a plain
+        // button sits a little in from its box. The chevron stays a button, for the keyboard.
+        const pressable = started && gui && Client
+        return (
+          <Box key={`phase-${key}-${p}`} flexDirection="column" marginTop={1}>
+            <Box key={`head-${key}-${p}`} flexDirection="column" {...head}>
+              <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+                <Box flexShrink={1} minWidth={0}>
+                  {started && !pressable
+                    ? control(button(`phase-${pk}`, p, { plain: true, bold: !gui }))
+                    : <Text wrap="truncate-end" {...(started ? {} : faint)}>{p}</Text>}
+                </Box>
+                {/* The count and the chevron are plain buttons alike, drawn the same way, so they sit
+                    level; the chevron centred in the row buttons' column, as the ↗ and ⚙ below it. */}
+                <Box flexDirection="row" alignItems="center" flexShrink={0}>
+                  {started && control(button(`count-${pk}`, `${done}/${prs.length}`, { plain: true, dim: true }))}
+                  {gearCell(started
+                    ? control(button(`fold-${pk}`, `\u00a0${chevron(shut)}\u00a0`, { plain: true, dim: true }))
+                    : <Text {...faint}>{chevron(true)}</Text>)}
+                </Box>
+              </Box>
+              {started && progress(`${key}-${p}`, prs)}
+              {pressable && (
+                <Box position="absolute" top={0} left={0} right={0} bottom={0}>
+                  <Client key={`hit-${pk}`} module="./press.tsx" props={{ id: pk }} width="100%" height="100%" />
+                </Box>
+              )}
+            </Box>
+            {!shut && (
+              <Box flexDirection="column" paddingX={gui ? 1 : 0} marginTop={gui ? 1 : 0}>
+                {!inline && columns(`cols-${key}-${p}`)}
+                {prs.flatMap(agentRow)}
+              </Box>
+            )}
+          </Box>
+        )
+      }
+
+      // Filled where the surface paints fills, as Claude Code's own panel draws a task, its corners
+      // rounded a step more than its blocks' (a round border drawn in no color); on the terminal a
+      // border, blue while it works and amber while paused.
+      const frame = gui
+        ? { backgroundColor: CARD_FILL, paddingY: 1, borderStyle: 'round', borderColor: CLEAR }
+        : {
+          borderStyle: 'round',
+          borderColor: state.kind === 'working' ? RUNNING : state.kind === 'paused' ? 'warning' : undefined,
+          borderDimColor: state.kind !== 'working' && state.kind !== 'paused',
+        }
 
       return (
-        <Box
-          key={`card-${key}`} flexDirection="column" borderStyle="round" paddingX={1} marginBottom={1}
-          borderColor={state.kind === 'working' ? RUNNING : state.kind === 'paused' ? 'warning' : undefined}
-          borderDimColor={state.kind !== 'working' && state.kind !== 'paused'}
-        >
+        <Box key={`card-${key}`} flexDirection="column" paddingX={1} marginBottom={1} {...frame}>
           <Box flexDirection="row" justifyContent="space-between" gap={1}>
             <Box flexShrink={1} minWidth={0}>
-              {control(button(`fold-${key}`, isWorkflow ? meta?.name ?? key : 'Subagents', { plain: true, prefix: isFolded ? '▸ ' : '▾ ', bold: true }))}
+              {control(button(`fold-${key}`, isWorkflow ? meta?.name ?? key : 'Subagents', { plain: true, prefix: `${chevron(isFolded)} `, bold: true }))}
             </Box>
             <Box flexDirection="row" gap={1} flexShrink={0}>
               {chip(key, state, tallies.get(key)!)}
@@ -1486,35 +1620,28 @@ export const register: Register = on => {
               {live === 0 && control(button(`close-${key}`, '✕', { plain: true }))}
             </Box>
           </Box>
-          <Box flexDirection="row" flexWrap="wrap" columnGap={3}>
-            <Box flexDirection="row" gap={1}>
-              <Text dimColor>{isWorkflow ? 'Workflow' : 'Agent tool'}</Text>
-              {timer(`span-${key}`, span, rate)}
-            </Box>
-            <Text>{rows.length}<Text dimColor> {rows.length === 1 ? 'agent' : 'agents'}</Text></Text>
-            <Text>{tokens(sumTokens(rows))}<Text dimColor> tokens</Text></Text>
-            <Text color="error">{money(sumCost(rows))}</Text>
+          <Box flexDirection="row" gap={1}>
+            <Text bold>{isWorkflow ? 'Workflow' : 'Agent tool'}</Text>
+            {timer(`span-${key}`, span, rate, true)}
+          </Box>
+          <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+            <Text><Text bold>{rows.length}</Text><Text dimColor> {rows.length === 1 ? 'agent' : 'agents'}</Text></Text>
+            <Text><Text bold>{tokens(sumTokens(rows))}</Text><Text dimColor> tokens</Text></Text>
+            <Text><Text bold>{money(sumCost(rows))}</Text><Text dimColor> est.</Text></Text>
           </Box>
           {!isFolded && meta?.description && <Text dimColor wrap="wrap">{meta.description}</Text>}
           {groupOpen && editor(`group-${key}`, go, groupNote, groupActions, tunable)}
-          {!isFolded && phaseOrder.map(p => {
-            const prs = phases.get(p)!
-            const done = prs.filter(r => r.status !== 'running').length
-            return (
-              <Box key={`phase-${key}-${p}`} flexDirection="column" marginTop={1}>
-                <Box flexDirection="row" justifyContent="space-between">
-                  <Text bold>{p}</Text>
-                  <Text dimColor>{done}/{prs.length}</Text>
-                </Box>
-                {progress(`${key}-${p}`, prs)}
-                {!inline && columns(`cols-${key}-${p}`)}
-                {prs.flatMap(agentRow)}
-              </Box>
-            )
-          })}
+          {!isFolded && hasPhases && <Box marginTop={1}><Text bold>Phases</Text></Box>}
+          {!isFolded && phaseOrder.map(phaseBlock)}
         </Box>
       )
     })
+    // Under "Running" the cards still going (working, paused, stopping or between phases), then
+    // the rest under "Finished", as Claude Code's own panel heads them.
+    const goingOn = ordered.filter(([key]) => active(key)).length
+    const section = (title: string) => (
+      <Box key={`section-${title}`} paddingX={1}><Text {...faint}>{title}</Text></Box>
+    )
 
     // Archived cards, folded into one line until unfolded: each can come back or go for good.
     const archive = shelf.length > 0 && (
@@ -1541,7 +1668,10 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        {cards}
+        {goingOn > 0 && section('Running')}
+        {cards.slice(0, goingOn)}
+        {goingOn < cards.length && section('Finished')}
+        {cards.slice(goingOn)}
         {ordered.length === 0 && (
           <Box paddingX={1} marginBottom={1}><Text dimColor>Nothing on the board: everything is archived.</Text></Box>
         )}

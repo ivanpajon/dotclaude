@@ -63,7 +63,7 @@ export type Control = 'pause' | 'stop'
 
 /** One Button or Select a pane draws; a press or pick runs it by `key` (and the picked `value`). */
 export type ControlItem =
-  | { kind: 'button'; key: string; label: string; plain?: boolean; prefix?: string; bold?: boolean }
+  | { kind: 'button'; key: string; label: string; plain?: boolean; prefix?: string; bold?: boolean; dim?: boolean }
   | { kind: 'select'; key: string; label: string; value: string; options: { value: string; label: string }[] }
 
 /** A group's time with none of its agents working: since when (while it lasts) and in total before that. */
@@ -105,7 +105,7 @@ declare module 'claude-code' {
       archived: Record<string, number>
       /** Whether the Archived section is unfolded. */
       archiveOpen: boolean
-      /** Groups the person folded or unfolded, by group key. */
+      /** Cards the person folded or unfolded, by group key, and phases on them by `<group>::<phase>`. */
       collapsed: Record<string, boolean>
       /** Pause or stop asked of a running agent, by agent id. */
       controls: Record<string, Control>
