@@ -15,6 +15,8 @@ export type AgentRow = {
   toolUseId: string
   /** Position among the run's agent() calls, from 1. */
   index?: number
+  /** The phase its workflow script ran it in, as its meta says; absent until read, or with none named. */
+  phase?: string
   label: string
   type: string
   model: string
@@ -50,12 +52,14 @@ export type WorkflowMeta = {
   phases: string[]
 }
 
-/** One line of an agent's live activity, as the Inspect pane shows it. */
+/** One line of an agent's live activity: its transcript, when its own can't be read. */
 export type LogEntry = {
   kind: 'text' | 'thinking' | 'tool' | 'note'
   text: string
   /** A tool call's name; its arguments summary is `text`. */
   tool?: string
+  /** Its place in the agent's whole stream, from 0: kept as the oldest entries fall off the log. */
+  at?: number
 }
 
 /** What the person asked of a running agent from the pane. */
@@ -113,8 +117,13 @@ declare module 'claude-code' {
       held: Record<string, boolean>
       /** The latest activity of each agent, by agent id, capped. */
       logs: Record<string, LogEntry[]>
-      /** The agent the Inspect pane shows. */
+      /** The agent the transcript pane shows. */
       inspecting: string | null
+      /**
+       * Parts of a transcript the person unfolded: `<agent id>:prompt`, its prompt shown whole, and
+       * `<agent id>:<call id>`, the run of tool calls that call opens listed.
+       */
+      unfolded: Record<string, boolean>
       /**
        * The folder Claude Code keeps this session's transcript and subagent files in, once a hook
        * named it: where an agent the monitor didn't see start is looked up.

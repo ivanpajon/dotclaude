@@ -22,7 +22,7 @@ The pane opens by itself when a subagent starts while none was running, and `/wo
 | Command | What it does |
 |---|---|
 | `/workflows` | Open the pane. It also opens by itself when a subagent starts. |
-| `/workflows demo` | Load a sample workflow to try the pane out: running, paused and stopped agents, phases, Inspect. |
+| `/workflows demo` | Load a sample workflow to try the pane out: running, paused and stopped agents, phases, transcripts. |
 | `/workflows clear` | Remove finished, archived and demo agents. Running ones stay. |
 | `/workflows help` | Show the commands, the pane's controls and the status icons. |
 
@@ -34,7 +34,7 @@ Each workflow run is a card, and so are the plain subagents started with the Age
 
 - **Header:** the workflow's name, its status chip, **⚙** for its settings, and **✕** once none of its agents is running.
 - **Summary:** how long it has been running, how many agents it started, their tokens, and their estimated cost. For a workflow the time is wall-clock time with no agent working left out; for the Subagents card it is the sum of each subagent's working time.
-- **Description and phases:** taken from the workflow script's `export const meta` (`name`, `description`, `phases`). Agents are grouped by the prefix of their label (`investigate:payment-flow` goes under **Investigate**), in the order the script's `phases` declare; a prefix it doesn't declare still gets its own phase, and agents without one go under **Agents**. Each phase has a header with how many of its agents finished, a small square per agent (grey once done, blue while working, amber while paused, red if it failed, an outline if it was stopped), and a chevron. Click the phase's name, count or chevron to fold or unfold its table of agents; on the desktop, a click anywhere on the header does it. A phase that has agents starts unfolded. On the desktop an unfolded phase header is filled; a folded one shows its fill only while the pointer is on it. While a workflow is still going, the phases its script declares that haven't started any agent yet are listed too, greyed out, with no count.
+- **Description and phases:** taken from the workflow script's `export const meta` (`name`, `description`, `phases`). Agents are grouped by the phase the script ran them in (`phase()`, or the `phase` option of `agent()`), in the order the script's `phases` declare. The phase comes from the agent's files in the session folder; when none is recorded there, the prefix of the agent's label stands in (`investigate:payment-flow` goes under **Investigate**), a prefix the script doesn't declare still gets its own phase, and agents without either go under **Agents**. Each phase has a header with how many of its agents finished, a small square per agent (grey once done, blue while working, amber while paused, red if it failed, an outline if it was stopped), and a chevron. Click the phase's name, count or chevron to fold or unfold its table of agents; on the desktop, a click anywhere on the header does it. A phase that has agents starts unfolded. On the desktop an unfolded phase header is filled; a folded one shows its fill only while the pointer is on it. While a workflow is still going, the phases its script declares that haven't started any agent yet are listed too, greyed out, with no count.
 - **Agent rows**, described below.
 
 A card stays unfolded while its group is still going: agents working, paused or stopping, or a workflow between phases. Meanwhile, cards that are over fold. In the terminal, the border is blue while an agent works and amber while they are paused. Once no card is still going, only the newest one stays unfolded. Click a card's name to fold or unfold it yourself; your choice then sticks.
@@ -46,11 +46,11 @@ A card stays unfolded while its group is still going: agents working, paused or 
 | Status | ● working · ⏸ paused · ⏹ stopped · ✓ done · ✗ failed. A finished agent's row is dimmed, with a grey ✓ |
 | Agent | The agent's label, cut short with "…" when space runs out |
 | Model | `Opus 5.5`, `Sonnet 5.5`, … |
-| Effort | `Low`, `Medium`, `High`, `Extra high` (in red while the agent runs) |
+| Effort | `Low`, `Medium`, `High`, `Extra high` (in orange while the agent runs), `Max` (in red while the agent runs) |
 | Tokens | Input, output and cache tokens together |
 | Time | Elapsed time, counting live; paused time is left out |
 | Cost | Estimated cost (see [Cost](#cost)) |
-| ⚙ / ↗ | **⚙** opens a running agent's settings; **↗** opens a finished agent's Inspect view |
+| ⚙ / ↗ | **⚙** opens a running agent's settings; **↗** opens a finished agent's transcript |
 
 Once a model or effort set from the pane (on the agent or its card) has applied to one of the agent's requests, its Model and Effort cells are highlighted.
 
@@ -85,18 +85,26 @@ Examples:
 
 On a **running agent's row**, ⚙ opens a panel under it with:
 
-- **Pause / Resume.** Pause holds the agent at its next tool call until you resume it, so it stops between steps without losing anything. A model request already under way finishes first, and an agent that answers without calling a tool finishes instead of waiting. It waits at a tool call because Claude Code ends a background or workflow agent that shows no progress for 10 minutes (and starts it again), and a tool call that is still running doesn't count as no progress. While it waits, the monitor runs a short sleeper process (`ping` on Windows, `sleep` elsewhere) every 30 seconds, since a hook can't otherwise wait more than 10 seconds. If no wait process will start, the pause is lifted instead of seeming to hold: a toast and a note in Inspect say so.
+- **Pause / Resume.** Pause holds the agent at its next tool call until you resume it, so it stops between steps without losing anything. A model request already under way finishes first, and an agent that answers without calling a tool finishes instead of waiting. It waits at a tool call because Claude Code ends a background or workflow agent that shows no progress for 10 minutes (and starts it again), and a tool call that is still running doesn't count as no progress. While it waits, the monitor runs a short sleeper process (`ping` on Windows, `sleep` elsewhere) every 30 seconds, since a hook can't otherwise wait more than 10 seconds. If no wait process will start, the pause is lifted instead of seeming to hold: a toast and a note in its transcript say so.
 - **Stop.** Ends the agent now: its next request is answered with a final reply in the model's place, and further tool calls are refused, so it winds down cleanly.
 - **Model** and **Effort** pickers. They apply from the agent's next request.
-- **Inspect**, to open its activity.
+- **View transcript**, to open its transcript.
 
 On a **card's header**, ⚙ opens the same for the whole group: **Pause all / Resume all**, **Stop all**, and a model and effort for every agent in it, including agents the workflow starts later. An agent's own setting wins over the card's. Once nothing in the card is running, **Archive** and **Remove** take the place of Pause all and Stop all. The model and effort pickers stay while the workflow may still start agents (between phases), and on the Subagents card, which new subagents can join at any time. Once a workflow has ended (done, failed or stopped), they are hidden: there is nothing left for them to apply to.
 
 The icon shows **◆** while a model or effort is set and can still apply, and **▴** while its panel is open.
 
-### ↗ Inspect
+### ↗ View transcript
 
-Opens the Inspect view in another tab: the agent's latest activity, its thinking, text and tool calls (the last 80 entries), with its status, model, effort and tokens on top. A running agent's Inspect follows along live and has Pause and Stop too. If Claude Code ended the agent itself after it showed no progress, its Inspect says so, how long it had been quiet, and which attempt took over.
+Opens the agent's transcript in another tab, titled with its description and laid out like Claude Code's own **View transcript** for a subagent:
+
+- **Model** and **Effort** on top. While the agent runs, **Pause** and **Stop** sit beside them; once it is over, how it ended (Completed, Stopped or Failed).
+- **The prompt** it was given, in a filled box. A prompt over 1200 characters is cut to about twelve lines, with **Show more** to read it whole. For a workflow agent this is the task its script computed. The harness's copy of your request and Claude Code's reminders are left out.
+- **Its replies**, as markdown, in order. Each run of tool calls between them is one line in Claude Code's own wording, such as `Ran 10 commands, used a tool` or `Read and edited cart.ts`. A trailing `(a tool failed)` means its last call failed, shown once that run is over. Click the line to list each call: the command's description, the file, the pattern or the page, marked `(failed)` when it failed.
+- **Its answer** last: the report a subagent hands back, or a workflow agent's structured result, each field under its name. An agent that ended without an answer says `No result — task stopped` (or failed, or ended). A last reply counts as the answer only when the agent completed: a workflow agent that failed because it never returned the result its script asked for shows its reply and `No result — task failed`.
+- **Totals** at the bottom: tool calls, tokens (the same count as its row) and time, counting live while it runs. Above them, while it works, what it is doing now, such as `Running a command…` or `Thinking…`.
+
+The transcript is read from the file Claude Code keeps for the agent in the session folder and follows along live; each redraw parses only what was added. A file over 4 MiB (common for long workflow agents) is more than a mod can read in one go, so it comes through the system's own reader (`type` on Windows, `cat` elsewhere), every 3 seconds at most while the agent works. A plain subagent's can also come from the session itself. When neither can be read (as for the demo's agents), it is rebuilt from the activity the monitor saw stream: the latest 200 entries. If Claude Code ended the agent itself after it showed no progress, the transcript says so, how long it had been quiet, and which attempt took over.
 
 ### ✕ Archive
 
@@ -114,7 +122,7 @@ Cost is an estimate from Anthropic's list prices per million tokens (input, outp
 ## Notes and limits
 
 - The monitor keeps its data for the current session only: a new session starts with an empty board.
-- It lists agents that start after it loads. Agents already running when it loaded join at their next model request, and their tokens count from then. It keeps the latest 500 agents and the latest 200 activity entries per agent.
+- It lists agents that start after it loads. Agents already running when it loaded join at their next model request, and their tokens count from then. It keeps the latest 500 agents and, for transcripts it can't read from the session's files, the latest 200 activity entries per agent.
 - When Claude Code starts a stalled agent again, the new attempt joins the same card as `label (retry N)`, and the first attempt shows as stopped. A pause or stop, model or effort set on the first attempt carries over. Claude Code doesn't tell mods about these attempts, so the monitor finds them, and agents running before it loaded, in the session's files.
 - Workflow names, descriptions and phases come from the script's `meta`, read from where the Workflow tool saved it. If the script can't be read, the name and description come from the Workflow tool's launch result (or the script's file name) and the card has no phases, unless it is a resumed run, which keeps the description and phases its first launch gave. With neither, the card is named after its run id.
 

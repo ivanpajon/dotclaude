@@ -2,6 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentRow, AgentStatus, AgentUsage, Control, ControlItem, Idle, LogEntry, Override, RunOutcome, WorkflowMeta } from '../types'
+import { activity, fromLog, fromMessages, Reader, step, summary } from './transcript'
+import type { Transcript } from './transcript'
 
 const PANE = 'workflow-monitor'
 const INSPECT = 'workflow-monitor-agent'
@@ -21,8 +23,9 @@ const USAGE = [
     + ' and pick the model and effort of its next requests. On a card\'s header: the same for every agent in the workflow, the ones it starts later'
     + ' too (an agent\'s own setting wins); once the workflow is over, Archive or Remove it. It shows **◆** while a'
     + ' model or effort is set.',
-  '- **↗** opens the Inspect view in another tab: a finished agent\'s latest activity, its thinking, text and tool'
-    + ' calls. For a running agent, Inspect is in its settings panel and follows along live.',
+  '- **↗** opens a finished agent\'s transcript in another tab, as Claude Code\'s own View transcript does: the'
+    + ' prompt it was given, its replies, each run of tool calls summed up in a line that unfolds, and its answer.'
+    + ' For a running agent, View transcript is in its settings panel and follows along live.',
   '- **✕** removes a finished workflow from the board. It isn\'t deleted: it moves under **Archived** at the bottom,'
     + ' where Restore brings it back and Remove deletes it from the monitor for good. If the run starts again, it'
     + ' comes back by itself.',
@@ -35,6 +38,13 @@ const MAX_LOG = 200
 const MAX_ENTRY = 4000
 // The final answer a stopped agent gives in place of its next model request.
 const STOP_TEXT = '(Stopped from the workflow monitor before it finished.)'
+
+// An agent's log with entries added, each numbered by its place in the whole stream (the number
+// it keeps as the oldest fall off), capped.
+function logged(list: LogEntry[], add: LogEntry[]): LogEntry[] {
+  let at = (list.at(-1)?.at ?? list.length - 1) + 1
+  return [...list, ...add.map(x => ({ ...x, at: at++ }))].slice(-MAX_LOG)
+}
 
 const agents = atom({ plugin: 'workflow-monitor', key: 'agents' } as const, [] as AgentRow[])
 const workflows = atom({ plugin: 'workflow-monitor', key: 'workflows' } as const, {} as Record<string, WorkflowMeta>)
@@ -49,6 +59,7 @@ const controls = atom({ plugin: 'workflow-monitor', key: 'controls' } as const, 
 const held = atom({ plugin: 'workflow-monitor', key: 'held' } as const, {} as Record<string, boolean>)
 const logs = atom({ plugin: 'workflow-monitor', key: 'logs' } as const, {} as Record<string, LogEntry[]>)
 const inspecting = atom({ plugin: 'workflow-monitor', key: 'inspecting' } as const, null as string | null)
+const unfolded = atom({ plugin: 'workflow-monitor', key: 'unfolded' } as const, {} as Record<string, boolean>)
 const idle = atom({ plugin: 'workflow-monitor', key: 'idle' } as const, {} as Record<string, Idle>)
 const archived = atom({ plugin: 'workflow-monitor', key: 'archived' } as const, {} as Record<string, number>)
 const archiveOpen = atom({ plugin: 'workflow-monitor', key: 'archiveOpen' } as const, false)
@@ -83,6 +94,7 @@ const EFFORT_OPTIONS = [
   { value: 'medium', label: 'Medium' },
   { value: 'high', label: 'High' },
   { value: 'xhigh', label: 'Extra high' },
+  { value: 'max', label: 'Max' },
 ]
 
 const ZERO: AgentUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
@@ -177,8 +189,9 @@ function duration(ms: number): string {
 }
 
 const effortLabel = (e?: string) => EFFORT_OPTIONS.find(o => o.value === e)?.label ?? e ?? '—'
-// The costliest efforts stand out in red.
-const effortColor =(e?: string) => (e === 'xhigh' || e === 'max' ? 'error' : undefined)
+// The costliest efforts stand out: Max in red, Extra high in orange, a step under it.
+const XHIGH = '#F0883E'
+const effortColor = (e?: string) => (e === 'max' ? 'error' : e === 'xhigh' ? XHIGH : undefined)
 
 type ApiUsage = { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }
 
@@ -303,7 +316,7 @@ const adopting = new Map<string, Promise<AgentRow | undefined>>()
 // Agents removed from the monitor, never looked up again.
 const removed = new Set<string>()
 
-type Found = { runId?: string; label: string; type: string; effort?: string; toolUseId?: string; startedAt: number; retryOf?: string; index?: number }
+type Found = { runId?: string; label: string; type: string; effort?: string; toolUseId?: string; startedAt: number; retryOf?: string; index?: number; phase?: string }
 
 async function adopt($: EngineInterface, id: string, model: string): Promise<AgentRow | undefined> {
   if (removed.has(id) || !(await read($, sessionDir))) return undefined
@@ -330,7 +343,7 @@ async function adopt($: EngineInterface, id: string, model: string): Promise<Age
 async function findAgent($: EngineInterface, id: string, final: boolean): Promise<Found | undefined> {
   const dir = await read($, sessionDir)
   if (!dir) return undefined
-  const meta = async (path: string) => JSON.parse(await $.fs.read(path)) as { description?: string; agentType?: string; effort?: string; toolUseId?: string }
+  const meta = async (path: string) => JSON.parse(await $.fs.read(path)) as { description?: string; agentType?: string; effort?: string; toolUseId?: string; workflowPhase?: string }
   // The meta is written as the agent starts, and never again.
   const startedAt = async (path: string) => (await $.fs.stat(path)).mtimeMs
   const plain = `${dir}/subagents/agent-${id}.meta.json`
@@ -351,7 +364,7 @@ async function findAgent($: EngineInterface, id: string, final: boolean): Promis
     const file = `${root}/${run.name}/agent-${id}.meta.json`
     if (!(await $.fs.exists(file))) continue
     const m = await meta(file)
-    type Started = { type?: string; key?: string; agentId?: string; label?: string }
+    type Started = { type?: string; key?: string; agentId?: string; label?: string; phase?: string }
     const journal = await $.fs.read(`${root}/${run.name}/journal.jsonl`).catch(() => '')
     const started = journal.split('\n').filter(l => l.includes('"started"')).flatMap((l): Started[] => {
       try { return [JSON.parse(l) as Started] } catch { return [] }
@@ -379,9 +392,55 @@ async function findAgent($: EngineInterface, id: string, final: boolean): Promis
       runId: run.name, label: n > 0 ? `${base} (retry ${n})` : base, type: m.agentType ?? 'workflow-subagent',
       startedAt: await startedAt(file), retryOf,
       index: mine ? [...new Set(started.map(s => s.key))].indexOf(mine.key) + 1 : undefined,
+      phase: m.workflowPhase || mine?.phase || undefined,
     }
   }
   return undefined
+}
+
+// A prompt longer than this, in characters, is cut short in the transcript view until Show more,
+// as Claude Code's own view cuts one.
+const PROMPT_LONG = 1200
+
+// The transcript Claude Code writes for each subagent, beside its meta (see findAgent). The view
+// redraws at every few chunks the agent streams, so the file is read again only when it changed,
+// and only what was added since is parsed. fs.read stops at 4 MiB, and a long workflow agent's file
+// runs past that: a bigger one comes through the host's own reader, whole each time, so at most
+// every few seconds while the agent works. A file that can't be read now leaves the last read
+// standing. A plain subagent's the session can also hand over; a workflow agent's only its file has.
+const READ_MAX = 4 * 1024 * 1024
+const BIG_EVERY_MS = 3000
+// What the text the reader was fed ends with: a file no longer holding it there was rewritten, and
+// is read anew.
+const TAIL = 256
+type FileRead = { size: number; mtimeMs: number; reader: Reader; tail: string; readAt: number }
+const reads = new Map<string, FileRead>()
+async function transcriptOf($: EngineInterface, r: AgentRow): Promise<Transcript | undefined> {
+  const dir = await read($, sessionDir)
+  if (dir) {
+    const path = r.runId ? `${dir}/subagents/workflows/${r.runId}/agent-${r.id}.jsonl` : `${dir}/subagents/agent-${r.id}.jsonl`
+    const stat = await $.fs.stat(path).catch(() => undefined)
+    if (stat?.kind === 'file') {
+      const was = reads.get(path)
+      if (was && was.size === stat.size && was.mtimeMs === stat.mtimeMs) return was.reader.transcript
+      const big = stat.size > READ_MAX
+      const now = await $.clock.now()
+      if (was && big && r.status === 'running' && now - was.readAt < BIG_EVERY_MS) return was.reader.transcript
+      const text = big ? await streamed($, path) : await $.fs.read(path).catch(() => streamed($, path))
+      if (text === undefined) return was?.reader.transcript
+      const same = was && text.length >= was.reader.fed && text.slice(Math.max(0, was.reader.fed - TAIL), was.reader.fed) === was.tail
+      const reader = same ? was.reader : new Reader()
+      reader.feed(text.slice(reader.fed))
+      // The last few read, the latest last.
+      reads.delete(path)
+      reads.set(path, { size: stat.size, mtimeMs: stat.mtimeMs, reader, tail: text.slice(Math.max(0, reader.fed - TAIL), reader.fed), readAt: now })
+      for (const old of [...reads.keys()].slice(0, -3)) reads.delete(old)
+      return reader.transcript
+    }
+  }
+  if (r.runId) return undefined
+  const rows = await $.session.messages({ agentId: r.id }).catch(() => undefined)
+  return Array.isArray(rows) && rows.length ? fromMessages(rows) : undefined
 }
 
 // Lists an agent found in the session's files. A retry takes its first attempt's place: that one is
@@ -395,6 +454,7 @@ async function adoptRow($: EngineInterface, id: string, found: Found, model: str
     label: found.label, type: found.type, model, effort: found.effort, isOverridden: false,
     status: 'running', startedAt: Math.min(found.startedAt || t, t), steps: 0, usage: ZERO,
     ...(found.retryOf ? { retryOf: found.retryOf } : {}),
+    ...(found.phase ? { phase: found.phase } : {}),
   }
   // A run that began before the monitor loaded: its name and phases from its saved script.
   if (found.runId && !(await read($, workflows))[found.runId]) {
@@ -429,11 +489,37 @@ async function adoptRow($: EngineInterface, id: string, found: Found, model: str
   return row
 }
 
-// An agent's phase: its label's prefix (`investigate:x`) matched to a phase title.
-function phaseOf(label: string, phases: string[]): string | undefined {
-  const prefix = label.split(':')[0]?.trim().toLowerCase()
-  if (!prefix || prefix === label.trim().toLowerCase()) return undefined
+// An agent's phase: the one its script ran it in, as its files say (see notePhase), matched to a
+// phase title the script names; with none known, its label's prefix (`investigate:x`), as a run's
+// agents are often named.
+function phaseOf(r: AgentRow, phases: string[]): string | undefined {
+  const own = r.phase?.trim()
+  if (own) return phases.find(p => p.toLowerCase() === own.toLowerCase()) ?? own
+  const prefix = r.label.split(':')[0]?.trim().toLowerCase()
+  if (!prefix || prefix === r.label.trim().toLowerCase()) return undefined
   return phases.find(p => p.toLowerCase() === prefix) ?? prefix[0].toUpperCase() + prefix.slice(1)
+}
+
+// A workflow agent's phase, from its meta: Claude Code writes it as the agent starts, naming the
+// phase the script was in (`phase()`, or the agent() call's own `phase`). Looked at a few times
+// while the file may not be there yet, and once read never again.
+const phaseLooks = new Map<string, number>()
+async function notePhase($: EngineInterface, row: AgentRow) {
+  if (!row.runId || row.phase !== undefined) return
+  const looks = phaseLooks.get(row.id) ?? 0
+  if (looks < 0 || looks >= 3) return
+  const dir = await read($, sessionDir)
+  if (!dir) return
+  const text = await $.fs.read(`${dir}/subagents/workflows/${row.runId}/agent-${row.id}.meta.json`).catch(() => undefined)
+  if (text === undefined) {
+    phaseLooks.set(row.id, looks + 1)
+    return
+  }
+  phaseLooks.set(row.id, -1)
+  let phase: unknown
+  try { phase = (JSON.parse(text) as { workflowPhase?: unknown }).workflowPhase } catch { return }
+  if (typeof phase !== 'string' || !phase.trim()) return
+  await update($, agents, all => all.map(a => (a.id === row.id && a.phase === undefined ? { ...a, phase } : a)))
 }
 
 // A tool call's arguments in a few words: the field a person would look for first.
@@ -544,13 +630,36 @@ async function hold($: EngineInterface, id: string, signal: AbortSignal): Promis
   }
 }
 
+// Whether the host is Windows, as its environment says.
+let windows: boolean | undefined
+async function onWindows($: EngineInterface): Promise<boolean> {
+  windows ??= (await $.env.get('OS').catch(() => undefined)) === 'Windows_NT'
+  return windows
+}
+
+// A file's text through the host's own reader (`type` on Windows, `cat` elsewhere), which has no
+// limit on its size; undefined when that fails.
+async function streamed($: EngineInterface, path: string): Promise<string | undefined> {
+  const argv = (await onWindows($)) ? ['cmd', '/d', '/c', 'type', path.replace(/\//g, '\\')] : ['cat', '--', path]
+  const pieces: string[] = []
+  try {
+    const stream = $.process.spawn({ argv })
+    for (let s = await stream.next(); ; s = await stream.next()) {
+      if (s.done) return s.value.code === 0 ? pieces.join('') : undefined
+      if (s.value.stream === 'stdout') pieces.push(s.value.text)
+    }
+  } catch {
+    return undefined
+  }
+}
+
 // Half a minute's wait on the host: a child that sleeps (`ping` on Windows, which has no `sleep`).
 // One that fails (it can't start, a sleeping machine cut it short, another `ping` comes first on
 // the PATH) gives way to the next; false once none would wait.
 let sleepers: (readonly string[])[] | undefined
 let sleeper = 0
 async function nap($: EngineInterface): Promise<boolean> {
-  sleepers ??= (await $.env.get('OS').catch(() => undefined)) === 'Windows_NT'
+  sleepers ??= (await onWindows($))
     ? [['ping', '-n', '31', '127.0.0.1'], ['powershell', '-NoProfile', '-Command', 'Start-Sleep -Seconds 30']]
     : [['sleep', '30'], ['/bin/sleep', '30']]
   for (let tries = 0; tries < sleepers.length * 2; tries++) {
@@ -683,6 +792,7 @@ async function removeAgents($: EngineInterface, ids: string[]) {
     stoppers.delete(id)
     progress.delete(id)
     ended.delete(id)
+    phaseLooks.delete(id)
     removed.add(id)
     wake(id)
   }
@@ -694,6 +804,7 @@ async function removeAgents($: EngineInterface, ids: string[]) {
   await update($, agentOverrides, drop)
   await update($, controls, drop)
   await update($, held, drop)
+  await update($, unfolded, all => Object.fromEntries(Object.entries(all).filter(([k]) => !gone.has(k.slice(0, k.lastIndexOf(':'))))))
   const arch = await update($, archived, drop)
   // A group's panel closes only once its card has left the board (plain subagents can have a
   // card on it and older ones under Archived at once).
@@ -751,10 +862,16 @@ async function perform($: EngineInterface, key: string, value?: string) {
   const agent = (id: string) => list.find(a => a.id === id)
   const running = (group: string) => list.filter(a => groupKey(a) === group && a.status === 'running')
   const toggleEditor = (id: string) => update($, editing, cur => (cur === id ? null : id))
+  // Titled with the agent's description, as Claude Code's own transcript view is.
   const inspect = async (id: string) => {
     await update($, inspecting, () => id)
-    await $.ui.open({ id: INSPECT, title: `Agent · ${agent(id)?.label ?? id}` })
+    await $.ui.open({ id: INSPECT, title: agent(id)?.label ?? id })
   }
+  // A part of a transcript, unfolded or folded back: its prompt, or a run of its tool calls.
+  const unfold = (k: string) => update($, unfolded, all => {
+    const { [k]: was, ...others } = all
+    return was ? others : { ...others, [k]: true }
+  })
   const choose = (o: Override, field: keyof Override): Override => ({ ...o, [field]: value === 'inherit' ? undefined : value })
   const rest = (prefix: string) => key.slice(prefix.length)
   // Pause and Stop act on running agents only (a panel can outlive its agent), and a stop already
@@ -789,7 +906,10 @@ async function perform($: EngineInterface, key: string, value?: string) {
   } else if (key.startsWith('stop-all-')) await control(running(rest('stop-all-')).filter(r => stoppable(r.id)).map(r => r.id), 'stop')
   else if (key.startsWith('pause-')) { const id = rest('pause-'); if (stoppable(id)) await control([id], ctl[id] === 'pause' ? null : 'pause') }
   else if (key.startsWith('stop-')) { const id = rest('stop-'); if (stoppable(id)) await control([id], 'stop') }
-  else if (key.startsWith('activity-')) await inspect(rest('activity-'))
+  else if (key.startsWith('transcript-')) await inspect(rest('transcript-'))
+  // A transcript's Show more (`more-<agent>`) and its runs of tool calls (`steps-<agent>:<first call>`).
+  else if (key.startsWith('more-')) await unfold(`${rest('more-')}:prompt`)
+  else if (key.startsWith('steps-')) await unfold(rest('steps-'))
   else if (key.startsWith('done-')) await update($, editing, () => null)
   else if (key.startsWith('model-group-') || key.startsWith('effort-group-')) {
     const field = key.startsWith('model-') ? 'model' : 'effort'
@@ -815,6 +935,17 @@ const DEMO_SCRIPT: LogEntry[] = [
   { kind: 'text', text: 'Payment retries reuse the same idempotency key, which is correct.' },
 ]
 
+// What the demo's agents were asked, for their transcripts.
+const DEMO_PROMPT = [
+  'Look into the checkout flow for the redesign.',
+  '',
+  '## What to cover',
+  '- Where the cart is validated, and whether it happens more than once',
+  '- How payment retries reuse their idempotency key',
+  '',
+  'Report what you find with file and line references. Don\'t change any code.',
+].join('\n')
+
 function demoSeed(t: number): { rows: AgentRow[]; logs: Record<string, LogEntry[]> } {
   const row = (n: number, label: string, model: string, effort: string, status: AgentStatus, ago: number, took: number | undefined, out: number, runId?: string): AgentRow => ({
     id: `${DEMO}${n}`, runId, toolUseId: runId ? 'toolu_demo' : 'toolu_demo_sub', index: runId ? n : undefined,
@@ -827,7 +958,7 @@ function demoSeed(t: number): { rows: AgentRow[]; logs: Record<string, LogEntry[
     row(1, 'investigate:payment-flow', 'claude-opus-5-5', 'high', 'done', 240, 95, 6200, wf),
     row(2, 'investigate:cart-state', 'claude-sonnet-5-5', 'medium', 'done', 238, 70, 4100, wf),
     row(3, 'investigate:analytics-events', 'claude-haiku-5-5', 'low', 'failed', 236, 40, 900, wf),
-    row(4, 'design:api-contract', 'claude-opus-5-5', 'high', 'running', 120, undefined, 3900, wf),
+    row(4, 'design:api-contract', 'claude-opus-5-5', 'max', 'running', 120, undefined, 3900, wf),
     row(5, 'design:ui-components', 'claude-sonnet-5-5', 'medium', 'running', 118, undefined, 2800, wf),
     row(6, 'design:migration-plan', 'claude-sonnet-5-5', 'high', 'running', 115, undefined, 2100, wf),
     row(7, 'review:accessibility', 'claude-haiku-5-5', 'low', 'stopped', 60, 25, 700, wf),
@@ -888,10 +1019,10 @@ async function demoTick($: EngineInterface, t: number) {
   }))
   await update($, logs, all => {
     const next = { ...all }
-    for (const id of stopped) next[id] = [...(next[id] ?? []), { kind: 'note' as const, text: 'Stopped from the workflow monitor.' }]
+    for (const id of stopped) next[id] = logged(next[id] ?? [], [{ kind: 'note', text: 'Stopped from the workflow monitor.' }])
     if (stepper) {
       const list = next[stepper.id] ?? []
-      next[stepper.id] = [...list, DEMO_SCRIPT[list.length % DEMO_SCRIPT.length]].slice(-MAX_LOG)
+      next[stepper.id] = logged(list, [DEMO_SCRIPT[list.length % DEMO_SCRIPT.length]!])
     }
     return next
   })
@@ -929,11 +1060,15 @@ export const register: Register = on => {
     // The typeahead's line for it, and its options drawn dim after the name (USAGE spells them out).
     await $.command.register({
       name: 'workflows',
-      description: 'Live pane of workflows and subagents: model, effort, tokens, time, cost; pause, stop, inspect',
+      description: 'Live pane of workflows and subagents: model, effort, tokens, time, cost; pause, stop, transcripts',
       argumentHint: '[demo|clear|help]',
     })
     // A reload starts this module afresh: pick up the pauses and stops already asked for.
     for (const [id, v] of Object.entries(await read($, controls))) (v === 'pause' ? pauseRequested : stopRequested).add(id)
+    // Workflow agents listed before their phase was read (by an earlier monitor among them): their
+    // phase from their meta, the newest first.
+    const unplaced = (await read($, agents)).filter(a => a.runId && a.phase === undefined && !a.id.startsWith(DEMO))
+    for (const r of unplaced.sort((a, b) => b.startedAt - a.startedAt).slice(0, 100)) await notePhase($, r).catch(() => {})
     // Elapsed times tick by themselves on the surface (./ticker.tsx): nothing here redraws the
     // pane on a clock, so it redraws only when something changes. A run going quiet does (see
     // noteQuiet), and the demo's agents run on this.
@@ -1015,7 +1150,7 @@ export const register: Register = on => {
         // No wait would start on this machine: the pause is lifted, saying so, and the call runs.
         await setControl($, [id], null)
         const text = 'The pause couldn’t hold this agent (no wait process would start here), so it went on.'
-        await update($, logs, all => ({ ...all, [id]: [...(all[id] ?? []), { kind: 'note' as const, text }].slice(-MAX_LOG) }))
+        await update($, logs, all => ({ ...all, [id]: logged(all[id] ?? [], [{ kind: 'note', text }]) }))
         $.ui.toast(`Workflow monitor: ${text}`)
       }
       if (stopRequested.has(id)) return { deny: 'Stopped from the workflow monitor. Do not retry; finish now.' }
@@ -1056,6 +1191,7 @@ export const register: Register = on => {
       usage: ZERO,
     }
     await listAgent($, row)
+    await notePhase($, row).catch(() => {})
 
     return started
   })
@@ -1067,7 +1203,7 @@ export const register: Register = on => {
 
     // Stop: answer in the model's place with a final reply, so the agent's loop ends cleanly.
     if (stopRequested.has(id)) {
-      await update($, logs, all => ({ ...all, [id]: [...(all[id] ?? []), { kind: 'note' as const, text: 'Stopped from the workflow monitor.' }].slice(-MAX_LOG) }))
+      await update($, logs, all => ({ ...all, [id]: logged(all[id] ?? [], [{ kind: 'note', text: 'Stopped from the workflow monitor.' }]) }))
       yield { kind: 'text', index: 0, text: STOP_TEXT }
       return { turnId: e.turnId, index: e.index, answer: STOP_TEXT, toolUses: [], stopReason: 'end_turn', usage: null }
     }
@@ -1076,6 +1212,7 @@ export const register: Register = on => {
     // from it, is left be.
     const row = (await read($, agents)).find(a => a.id === id) ?? await adopt($, id, e.model)
     if (!row) return yield* next(e)
+    if (row.runId && row.phase === undefined) await notePhase($, row).catch(() => {})
     progress.set(id, await $.clock.now())
     const own = (await read($, agentOverrides))[id] ?? {}
     const group = (await read($, groupOverrides))[groupKey(row)] ?? {}
@@ -1089,13 +1226,13 @@ export const register: Register = on => {
     if (JSON.stringify(shown(row)) !== JSON.stringify(row)) {
       await update($, agents, list => list.map(a => (a.id === id ? shown(a) : a)))
     }
-    // Pass the stream through untouched, keeping a copy of it for the Inspect pane.
+    // Pass the stream through untouched, keeping a copy of it for the transcript pane.
     const before = (await read($, logs))[id] ?? []
     const blocks = new Map<number, LogEntry>()
     const inputs = new Map<number, string>()
     const flush = () => update($, logs, all => ({
       ...all,
-      [id]: [...before, ...[...blocks.entries()].map(([i, b]) => (b.kind === 'tool' ? { ...b, text: toolSummary(inputs.get(i) ?? '') } : b))].slice(-MAX_LOG),
+      [id]: logged(before, [...blocks.entries()].map(([i, b]) => (b.kind === 'tool' ? { ...b, text: toolSummary(inputs.get(i) ?? '') } : b))),
     }))
     const stream = next(sent)[Symbol.asyncIterator]()
     // Stop cuts the reply mid-stream: whichever comes first, the next chunk or the stop.
@@ -1153,7 +1290,7 @@ export const register: Register = on => {
       const wasStopped = stopRequested.has(id)
       const status: AgentStatus = wasStopped || e.reason === 'aborted' ? 'stopped' : e.reason === 'answer' ? 'done' : 'failed'
       // Ended from outside the monitor (Claude Code's stall check, the run stopped, an interrupt):
-      // how long it had gone without progress, for its Inspect view. A retried attempt was ended,
+      // how long it had gone without progress, for its transcript view. A retried attempt was ended,
       // with all that, as its retry started.
       const row = (await read($, agents)).find(a => a.id === id)
       const outside = row && e.reason === 'aborted' && !wasStopped ? { quietMs: quietOf(row, endedAt) } : {}
@@ -1336,8 +1473,8 @@ export const register: Register = on => {
       const isOpen = open === `agent:${r.id}`
       const hasOverride = !!(own[r.id]?.model || own[r.id]?.effort)
       const accent = r.isOverridden ? 'merged' : undefined
-      // Running: the settings gear. Finished: Inspect's own ↗, its one action left, straight to its
-      // activity (perform() tells them apart). Padded with no-break spaces, which no surface trims: a
+      // Running: the settings gear. Finished: View transcript's ↗, its one action left, straight to
+      // its transcript (perform() tells them apart). Padded with no-break spaces, which no surface trims: a
       // wider target than the glyph alone, in a column wide enough for it (see gearCell).
       const icon = r.status !== 'running' ? '↗' : isOpen ? '▴' : hasOverride ? '◆' : '⚙'
       // A finished agent is drawn grey throughout, its icon aside, as Claude Code's own panel does.
@@ -1347,9 +1484,9 @@ export const register: Register = on => {
       const state = paused ? (holding[r.id] ? '' : ' · pausing…') : stopping ? ' · stopping…' : ''
       const label = <Text wrap="truncate-end" dimColor={over}>{r.label}<Text color={color}>{state}</Text></Text>
       const time = timer(`time-${r.id}`, worked(r), working(r) ? 1 : 0, over)
-      // The costliest effort stands out in red while it still spends.
+      // The costliest efforts stand out (see effortColor) while they still spend.
       const effortHue = accent ?? (over ? undefined : effortColor(r.effort))
-      // Pause and Stop while it runs (a panel left open when it finishes keeps only Inspect).
+      // Pause and Stop while it runs (a panel left open when it finishes keeps only View transcript).
       const settings = isOpen && editor(
         r.id,
         own[r.id] ?? {},
@@ -1359,7 +1496,7 @@ export const register: Register = on => {
             button(`pause-${r.id}`, paused ? '▶ Resume' : '⏸ Pause'),
             button(`stop-${r.id}`, stopping ? '⏹ Stopping…' : '⏹ Stop'),
           ] : []),
-          button(`activity-${r.id}`, '↗ Inspect'),
+          button(`transcript-${r.id}`, 'View transcript'),
         ],
       )
 
@@ -1408,9 +1545,9 @@ export const register: Register = on => {
     // Small rounded squares where the surface draws SVG (desktop); block glyphs elsewhere.
     const progress = (key: string, rows: AgentRow[]) => {
       if (e.surface === 'desktop') {
-        // px of air above and below the squares, inside the drawing: finer than a row margin. Little
-        // below, where the phase header's own padding follows.
-        const size = 8, step = 11, padTop = 4, padBottom = 1
+        // px of air above and below the squares, inside the drawing: finer than a row margin. Below,
+        // with the phase header's thin padding (see head), as much as the header has at its sides.
+        const size = 8, step = 11, padTop = 4, padBottom = 5
         const perRow = Math.max(1, Math.floor(((width - CARD_X - 2) * 6) / step))
         const lines = Math.ceil(rows.length / perRow)
         const rects = rows.map((r, i) => {
@@ -1524,11 +1661,11 @@ export const register: Register = on => {
           ? `Archive (or ✕ on the card) moves it under Archived, where it can be restored; Remove deletes it from the monitor.${tunable ? ' Model and effort apply to agents it starts later.' : ''}`
           : 'Archive (or ✕ on the card) moves them under Archived, where they can be restored; Remove deletes them from the monitor. Model and effort apply to subagents started later.'
 
-      // Phases from the label prefix; agents without one go under "Agents". While the run goes on,
+      // Phases as each agent ran in (see phaseOf); agents with none go under "Agents". While the run goes on,
       // the phases its script names that started no agent yet are listed too, greyed and folded.
       const phases = new Map<string, AgentRow[]>()
       for (const r of [...rows].sort((a, b) => (a.index ?? a.startedAt) - (b.index ?? b.startedAt))) {
-        const p = (isWorkflow && phaseOf(r.label, meta?.phases ?? [])) || 'Agents'
+        const p = (isWorkflow && phaseOf(r, meta?.phases ?? [])) || 'Agents'
         phases.set(p, [...(phases.get(p) ?? []), r])
       }
       const planned = isWorkflow ? meta?.phases ?? [] : []
@@ -1550,18 +1687,23 @@ export const register: Register = on => {
         if (started) foldedNow.set(pk, shut)
         const done = prs.filter(r => r.status !== 'running').length
         // Where the surface paints fills, a padded box with rounded corners (see block): filled
-        // while unfolded; folded, the card's own until the pointer is on it.
+        // while unfolded; folded, the card's own until the pointer is on it. As much air above and
+        // below as at the sides: a row of padding is half a line, taller than a column is wide, and
+        // the name's line adds its own air above it, so a fraction of one (with the squares' own
+        // air below them, see progress).
         const head = gui
           ? {
-            paddingX: 1, paddingY: 1, borderStyle: 'single', borderColor: CLEAR,
+            paddingX: 1, paddingY: 0.4, borderStyle: 'single', borderColor: CLEAR,
             ...(shut ? {} : { backgroundColor: BLOCK_FILL }),
             ...(started && shut ? { hover: { backgroundColor: BLOCK_FILL } } : {}),
           }
           : {}
         // On the desktop the whole header takes a click, through a see-through region laid over it
-        // (press.tsx), so the name is plain text there, flush with the squares under it: a plain
-        // button sits a little in from its box. The chevron stays a button, for the keyboard.
+        // (press.tsx), so its name, count and chevron are plain text there: the name flush with the
+        // squares under it and the box's left edge, the chevron with its right edge (a plain button
+        // sits a little in from its box).
         const pressable = started && gui && Client
+        const count = `${done}/${prs.length}`
         return (
           <Box key={`phase-${key}-${p}`} flexDirection="column" marginTop={1}>
             <Box key={`head-${key}-${p}`} flexDirection="column" {...head}>
@@ -1571,14 +1713,26 @@ export const register: Register = on => {
                     ? control(button(`phase-${pk}`, p, { plain: true, bold: !gui }))
                     : <Text wrap="truncate-end" {...(started ? {} : faint)}>{p}</Text>}
                 </Box>
-                {/* The count and the chevron are plain buttons alike, drawn the same way, so they sit
-                    level; the chevron centred in the row buttons' column, as the ↗ and ⚙ below it. */}
-                <Box flexDirection="row" alignItems="center" flexShrink={0}>
-                  {started && control(button(`count-${pk}`, `${done}/${prs.length}`, { plain: true, dim: true }))}
-                  {gearCell(started
-                    ? control(button(`fold-${pk}`, `\u00a0${chevron(shut)}\u00a0`, { plain: true, dim: true }))
-                    : <Text {...faint}>{chevron(true)}</Text>)}
-                </Box>
+                {/* Elsewhere the count and the chevron are plain buttons alike, drawn the same way, so
+                    they sit level: the chevron at the box's right edge where it is filled, and on the
+                    terminal centred in the row buttons' column, as the ↗ and ⚙ below it. */}
+                {pressable
+                  ? (
+                    <Box flexDirection="row" alignItems="center" gap={1} flexShrink={0}>
+                      <Text dimColor>{count}</Text>
+                      <Text dimColor>{chevron(shut)}</Text>
+                    </Box>
+                  )
+                  : (
+                    <Box flexDirection="row" alignItems="center" flexShrink={0}>
+                      {started && control(button(`count-${pk}`, count, { plain: true, dim: true }))}
+                      {gui
+                        ? started ? control(button(`fold-${pk}`, chevron(shut), { plain: true, dim: true })) : <Text {...faint}>{chevron(true)}</Text>
+                        : gearCell(started
+                          ? control(button(`fold-${pk}`, `\u00a0${chevron(shut)}\u00a0`, { plain: true, dim: true }))
+                          : <Text {...faint}>{chevron(true)}</Text>)}
+                    </Box>
+                  )}
               </Box>
               {started && progress(`${key}-${p}`, prs)}
               {pressable && (
@@ -1620,9 +1774,11 @@ export const register: Register = on => {
               {live === 0 && control(button(`close-${key}`, '✕', { plain: true }))}
             </Box>
           </Box>
+          {/* The kind keeps its line whole; what follows it gives way, cut short with an ellipsis
+              (as the surface cuts a timer's error message, which runs long). */}
           <Box flexDirection="row" gap={1}>
-            <Text bold>{isWorkflow ? 'Workflow' : 'Agent tool'}</Text>
-            {timer(`span-${key}`, span, rate, true)}
+            <Box flexShrink={0}><Text bold>{isWorkflow ? 'Workflow' : 'Agent tool'}</Text></Box>
+            <Box flexShrink={1} minWidth={0} overflow="hidden">{timer(`span-${key}`, span, rate, true)}</Box>
           </Box>
           <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
             <Text><Text bold>{rows.length}</Text><Text dimColor> {rows.length === 1 ? 'agent' : 'agents'}</Text></Text>
@@ -1680,15 +1836,21 @@ export const register: Register = on => {
     )
   })
 
-  // One agent's live activity: thinking, text and tool calls as they stream.
+  // One agent's transcript, as Claude Code's own View transcript draws a subagent's: its model, the
+  // prompt it was given, its replies with each run of tool calls summed up in a line that unfolds,
+  // its answer, and a line of totals. It follows along while the agent works.
   on('ui.render', { component: 'Pane', requestId: INSPECT }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const elements = $.ui.resolve(e)
+    const { Box, Text, Button, Markdown } = elements
+    const Client = 'Client' in elements ? elements.Client : undefined
     const id = await read($, inspecting)
     const list = await read($, agents)
     const r = list.find(a => a.id === id)
     if (!id || !r) {
-      return <Box paddingX={1}><Text dimColor>Pick Inspect on an agent in the Workflows pane.</Text></Box>
+      return <Box paddingX={1}><Text dimColor>Pick View transcript on an agent in the Workflows pane.</Text></Box>
     }
+    const gui = e.surface !== 'terminal'
+    const faint = gui ? { color: HEADING } : { dimColor: true }
     // How it ended when the monitor didn't end it: a retry says Claude Code's stall check did;
     // without one it may have been that, the run stopped, or an interrupt. Said here, not on its row.
     const labelOf = (other: string) => list.find(a => a.id === other)?.label
@@ -1698,52 +1860,148 @@ export const register: Register = on => {
       : r.status === 'stopped' && r.quietMs !== undefined ? `Ended outside the monitor${quiet}.` : undefined
     const origin = r.retryOf && labelOf(r.retryOf)
     const retried = origin ? `Started by Claude Code after “${origin}” made no progress.` : undefined
-    const ctl = (await read($, controls))[id]
-    const entries = ((await read($, logs))[id] ?? []).slice(-80)
+    const ctls = await read($, controls)
+    const ctl = ctls[id]
+    const log = (await read($, logs))[id] ?? []
+    const open = await read($, unfolded)
     const [glyph, color] = look(r, ctl)
-    const status = r.status === 'running' ? (ctl === 'pause' ? 'paused' : ctl === 'stop' ? 'stopping' : 'running') : r.status
-    // Kept as in the Workflows pane: the log redraws this pane at every few chunks it streams.
+    const over = r.status !== 'running'
+
+    // Its own transcript; else what the monitor kept of its stream, and the monitor's own notes
+    // (a stop, a pause that couldn't hold) after either, as they aren't the agent's.
+    const own = await transcriptOf($, r).catch(() => undefined)
+    const t = own ?? fromLog(log, r.id.startsWith(DEMO) ? DEMO_PROMPT : undefined)
+    const notes = own ? log.filter(x => x.kind === 'note') : []
+
+    // Kept as in the Workflows pane: the transcript redraws this pane at every few chunks it streams.
     const keep = keeper(`${e.surface}:${INSPECT}`)
-    const control = (key: string, label: string) => keep(key, <Button key={key} label={label} onPress={byHook} />)
-    // A line led by a small dot in a cell of its own, so the dots stand in one column, centred on
-    // the line. Desktop draws the dot (a font's ● sits off its line and runs into the text).
-    const dot = e.surface === 'desktop'
-      ? (() => {
-          const { Svg } = $.ui.resolve(e)
-          return <Svg source={`<svg xmlns="http://www.w3.org/2000/svg" width="6" height="6" viewBox="0 0 6 6"><circle cx="3" cy="3" r="3" fill="${RUNNING}"/></svg>`} alt="activity" width={6} height={6} />
-        })()
-      : <Text color={RUNNING}>●</Text>
-    const dotted = (key: string, line: unknown) => (
+    const control = (key: string, label: string, quiet = false) =>
+      keep(key, <Button key={key} label={label} plain={quiet || undefined} dimColor={quiet || undefined} onPress={byHook} />)
+    // A line led by a small dot in a cell of its own, centred on the line. Desktop draws the dot (a
+    // font's ● sits off its line and runs into the text).
+    const dot = (hex: string) => (e.surface === 'desktop' && 'Svg' in elements
+      ? <elements.Svg source={`<svg xmlns="http://www.w3.org/2000/svg" width="6" height="6" viewBox="0 0 6 6"><circle cx="3" cy="3" r="3" fill="${hex}"/></svg>`} alt="working" width={6} height={6} />
+      : <Text color={hex}>●</Text>)
+    const dotted = (key: string, hex: string, line: unknown) => (
       <Box key={key} flexDirection="row" gap={1} alignItems="center">
-        <Box width={1} flexShrink={0} justifyContent="center" alignItems="center">{dot}</Box>
+        <Box width={1} flexShrink={0} justifyContent="center" alignItems="center">{dot(hex)}</Box>
         <Box flexGrow={1} flexShrink={1} minWidth={0}>{line}</Box>
+      </Box>
+    )
+    // A message to the agent, in a filled box with rounded corners as a chat draws one; on the
+    // terminal a dim border.
+    const bubble = gui
+      ? { backgroundColor: CARD_FILL, paddingX: 2, paddingY: 1, borderStyle: 'round', borderColor: CLEAR }
+      : { borderStyle: 'round', borderDimColor: true, paddingX: 1 }
+
+    // Its model and effort, as Claude Code's own view starts ("Model Opus 5.5"); and while it runs
+    // Pause and Stop, or once over, how it ended.
+    const effortHue = over ? undefined : effortColor(r.effort)
+    const ended = r.status === 'done' ? 'Completed' : r.status === 'failed' ? 'Failed' : 'Stopped'
+    const head = (
+      <Box key="head" flexDirection="row" justifyContent="space-between" alignItems="center" columnGap={2} flexWrap="wrap">
+        <Text>
+          <Text {...faint}>Model </Text><Text>{shortModel(r.model)}</Text>
+          {r.effort && <Text {...faint}>{'   Effort '}</Text>}
+          {r.effort && <Text color={effortHue}>{effortLabel(r.effort)}</Text>}
+        </Text>
+        {r.status === 'running'
+          ? (
+            <Box flexDirection="row" gap={1}>
+              {control(`pause-${id}`, ctl === 'pause' ? '▶ Resume' : '⏸ Pause')}
+              {control(`stop-${id}`, ctl === 'stop' ? '⏹ Stopping…' : '⏹ Stop')}
+            </Box>
+          )
+          : <Text color={color}>{glyph} {ended}</Text>}
+      </Box>
+    )
+
+    // The prompt, cut short past 1200 characters as Claude Code's own view does, with Show more
+    // to read it whole: about twelve lines of it (a row is half a line where fills are painted).
+    const promptKey = `${id}:prompt`
+    const long = (t.prompt?.length ?? 0) > PROMPT_LONG
+    const cut = long && !open[promptKey]
+    const prompt = t.prompt !== undefined && (
+      <Box key="prompt" flexDirection="column" {...bubble}>
+        <Box key="prompt-body" flexDirection="column" {...(cut ? { height: gui ? 24 : 12, overflow: 'hidden' as const } : {})}>
+          <Markdown text={t.prompt} />
+        </Box>
+        {long && <Box marginTop={gui ? 1 : 0}>{control(`more-${id}`, cut ? 'Show more' : 'Show less', true)}</Box>}
+      </Box>
+    )
+
+    // Its replies in order; each run of tool calls between them a line that unfolds to list them,
+    // known by its first call (its place would shift as the oldest of a log fall off). A failed
+    // last call is said once the run is over.
+    const chevron = (shut: boolean) => (gui ? (shut ? '›' : '⌄') : (shut ? '▸' : '▾'))
+    const body = t.entries.map((x, i) => {
+      const key = `entry-${i}`
+      if (x.kind === 'text') return <Markdown key={key} text={x.text} />
+      if (x.kind === 'thinking') return <Markdown key={key} text={x.text} dimColor />
+      if (x.kind === 'user') return <Box key={key} flexDirection="column" {...bubble}><Markdown text={x.text} /></Box>
+      if (x.kind === 'note') return <Text key={key} color={STOPPED} wrap="wrap">{x.text}</Text>
+      const k = `${id}:${x.calls[0]?.id ?? i}`
+      const shut = !open[k]
+      const closed = over || i < t.entries.length - 1
+      return (
+        <Box key={key} flexDirection="column">
+          <Box flexDirection="row">{control(`steps-${k}`, `${summary(x.calls, closed)} ${chevron(shut)}`, true)}</Box>
+          {!shut && (
+            <Box flexDirection="column" marginTop={gui ? 1 : 0} paddingLeft={2}>
+              {x.calls.map((c, j) => {
+                const [what, meta] = step(c)
+                return (
+                  <Text key={`step-${k}-${j}`} wrap="truncate-end">
+                    {what}
+                    {meta && <Text {...faint}>{`  ${meta}`}</Text>}
+                    {c.failed && <Text color="error"> (failed)</Text>}
+                  </Text>
+                )
+              })}
+            </Box>
+          )}
+        </Box>
+      )
+    })
+
+    // Its answer; a finished one that gave none says so, as Claude Code's own view does. Its last
+    // reply is its answer only when it completed: one that failed or was stopped (a workflow agent
+    // that never returned the result its script asked for) gave none.
+    const last = t.entries.at(-1)
+    const answered = t.result !== undefined || (r.status === 'done' && last?.kind === 'text' && last.text !== STOP_TEXT)
+    const result = t.result !== undefined
+      ? <Markdown key="result" text={t.result} />
+      : over && !answered && <Text key="none" {...faint}>{`No result — task ${r.status === 'failed' ? 'failed' : r.status === 'stopped' ? 'stopped' : 'ended'}`}</Text>
+    const empty = t.prompt === undefined && t.entries.length === 0 && !result
+
+    // While it runs: what it's doing now, or that it's paused or stopping.
+    const doing = ctl === 'pause' ? ((await read($, held))[id] ? 'Paused' : 'Pausing…') : ctl === 'stop' ? 'Stopping…' : activity(t)
+    const hex = ctl === 'pause' ? PAUSED : ctl === 'stop' ? STOPPED : RUNNING
+    const now = await $.clock.now()
+    const worked = (r.pausedSince ?? r.endedAt ?? now) - r.startedAt - (r.pausedTotal ?? 0)
+    const total = totalTokens(r.usage)
+    const totals = `${t.calls === 1 ? '1 tool call' : `${t.calls} tool calls`} · ${total === 1 ? '1 token' : `${tokens(total)} tokens`} · `
+    const footer = (
+      <Box key="footer" flexDirection="row">
+        <Text {...faint}>{totals}</Text>
+        {Client
+          ? <Client key="footer-time" module="./ticker.tsx" props={{ base: worked, rate: isWorking(r, ctls) ? 1 : 0, dim: true }} />
+          : <Text {...faint}>{duration(worked)}</Text>}
       </Box>
     )
 
     return (
-      <Box flexDirection="column" paddingX={1}>
-        <Box flexDirection="row" justifyContent="space-between" columnGap={2} flexWrap="wrap">
-          <Box flexShrink={1} minWidth={0}><Text bold wrap="truncate-end">{r.label}</Text></Box>
-          <Text><Text color={color}>{glyph} {status}</Text><Text dimColor> · {shortModel(r.model)} · {effortLabel(r.effort)} · {tokens(totalTokens(r.usage))} tok</Text></Text>
-        </Box>
-        {retried && <Box marginTop={1}><Text color="inactive" wrap="wrap">{retried}</Text></Box>}
-        {ending && <Box marginTop={1}><Text color={STOPPED} wrap="wrap">{ending}</Text></Box>}
-        {r.status === 'running' && (
-          <Box flexDirection="row" gap={1} marginTop={1}>
-            {control(`pause-${id}`, ctl === 'pause' ? '▶ Resume' : '⏸ Pause')}
-            {control(`stop-${id}`, ctl === 'stop' ? '⏹ Stopping…' : '⏹ Stop')}
-          </Box>
-        )}
-        <Box flexDirection="column" marginTop={1} gap={1}>
-          {entries.length === 0 && <Text dimColor>Nothing yet: activity shows here from the agent's next model request.</Text>}
-          {entries.map((x, i) =>
-            x.kind === 'thinking' ? <Text key={`l-${i}`} color="inactive" italic wrap="wrap">{x.text.trim()}</Text>
-            : x.kind === 'tool' ? dotted(`l-${i}`, <Text wrap="truncate-end"><Text bold>{x.tool}</Text><Text dimColor>  {x.text}</Text></Text>)
-            : x.kind === 'note' ? <Text key={`l-${i}`} color={STOPPED}>{x.text}</Text>
-            : <Text key={`l-${i}`} wrap="wrap">{x.text.trim()}</Text>,
-          )}
-          {r.status === 'running' && ctl !== 'pause' && dotted('working', <Text color={RUNNING}>working…</Text>)}
-        </Box>
+      <Box flexDirection="column" paddingX={1} gap={gui ? 2 : 1}>
+        {head}
+        {retried && <Text key="retried" color="inactive" wrap="wrap">{retried}</Text>}
+        {ending && <Text key="ending" color={STOPPED} wrap="wrap">{ending}</Text>}
+        {prompt}
+        {body}
+        {notes.map((x, i) => <Text key={`note-${i}`} color={STOPPED} wrap="wrap">{x.text}</Text>)}
+        {result}
+        {empty && <Text key="empty" {...faint}>No activity yet</Text>}
+        {r.status === 'running' && dotted('doing', hex, <Text color={hex}>{doing}</Text>)}
+        {footer}
       </Box>
     )
   })

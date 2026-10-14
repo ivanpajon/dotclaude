@@ -101,17 +101,35 @@ test('tracks a workflow agent, applies overrides, and pauses, stops and inspects
   expect(sent.at(-1)).toEqual({ model: 'claude-haiku-5-5', effort: 'low' })
   expect(sent[0]).toEqual({ model: 'claude-opus-5-5', effort: 'high' })
   expect(await pane.find({ text: 'Haiku 5.5' })).toBeTruthy()
+  // Max is offered too, and applies like the rest.
+  await $.ui.select({ plugin: 'workflow-monitor', key: 'effort-agent-2', value: 'max' })
+  await step('agent-2', 1)
+  expect(sent.at(-1)).toEqual({ model: 'claude-haiku-5-5', effort: 'max' })
+  await $.ui.select({ plugin: 'workflow-monitor', key: 'effort-agent-2', value: 'low' })
 
-  // Inspect shows the agent's streamed thinking, text and tool calls.
-  await pane.press({ key: 'activity-agent-2' })
+  // View transcript shows its model, replies and tool calls: here from the stream the monitor kept
+  // (the agent's own transcript is a file, see the test on it), its thinking dim.
+  await pane.press({ key: 'transcript-agent-2' })
   for (const surface of SURFACES) {
-    const inspect = await $.ui.mount({ plugin: 'workflow-monitor', surface, component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport })
-    expect(await inspect.find({ text: 'Checking the detail pages' })).toBeTruthy()
-    expect(await inspect.find({ text: 'Reading the store page.' })).toBeTruthy()
-    expect(await inspect.find({ text: /src\/store\.ts/ })).toBeTruthy()
-    // A tool call's dot: drawn on the desktop, a glyph elsewhere.
-    if (surface === 'desktop') expect(JSON.stringify(await inspect.drawn())).toContain('"alt":"activity"')
-    await inspect.unmount()
+    const view = await $.ui.mount({ plugin: 'workflow-monitor', surface, component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport })
+    expect(await view.find({ text: 'Haiku 5.5' })).toBeTruthy()
+    const md = (await view.findAll({ type: 'Markdown' })).map(x => [x.props.text, !!x.props.dimColor])
+    expect(md).toContainEqual(['Checking the detail pages', true])
+    expect(md).toContainEqual(['Reading the store page.', false])
+    // Each run of tool calls is a line that unfolds to list them, known by its first call: here the
+    // third entry of the stream.
+    const [shut, open] = surface === 'desktop' ? ['›', '⌄'] : ['▸', '▾']
+    expect((await view.find({ key: 'steps-agent-2:log-2' }))?.props.label).toBe(`Read a file ${shut}`)
+    expect(await view.find({ text: /src\/store\.ts/ })).toBeFalsy()
+    await view.press({ key: 'steps-agent-2:log-2' })
+    expect((await view.find({ key: 'steps-agent-2:log-2' }))?.props.label).toBe(`Read a file ${open}`)
+    expect(await view.find({ text: /src\/store\.ts/ })).toBeTruthy()
+    await view.press({ key: 'steps-agent-2:log-2' })
+    // While it works, what it's doing now, after a dot drawn on the desktop; then its totals.
+    expect(await view.find({ text: 'Thinking…' })).toBeTruthy()
+    if (surface === 'desktop') expect(JSON.stringify(await view.drawn())).toContain('"alt":"working"')
+    expect(await view.find({ text: /^2 tool calls · 26\.0k tokens · $/ })).toBeTruthy()
+    await view.unmount()
   }
 
   // Pause holds its next tool call until Resume; its model requests go on meanwhile.
@@ -169,8 +187,10 @@ test('/workflows demo loads sample agents that honour Stop', async ($, on) => {
   expect(JSON.stringify(await pane.drawn())).not.toContain('"alt":"stopped"')
   expect(await pane.find({ text: /⏸/ })).toBeTruthy()
   expect(await pane.find({ text: /· paused/ })).toBeFalsy()
-  // The costliest effort stands out in red; a finished row opens its activity from a padded ↗.
-  expect((await pane.findAll({ text: 'Extra high' })).some(x => x.type === 'Text' && x.props.color === 'error')).toBe(true)
+  // The costliest efforts stand out, Max in red and Extra high in orange; a finished row opens its
+  // activity from a padded ↗.
+  expect((await pane.findAll({ text: 'Max' })).some(x => x.type === 'Text' && x.props.color === 'error')).toBe(true)
+  expect((await pane.findAll({ text: 'Extra high' })).some(x => x.type === 'Text' && x.props.color === '#F0883E')).toBe(true)
   expect((await pane.find({ key: 'gear-demo-3' }))?.props.label).toBe(' ↗ ')
   // It sits centred in a column wide enough for the desktop's native button round it.
   type Node = { key?: string; props?: Record<string, unknown>; children?: unknown[] }
@@ -179,9 +199,10 @@ test('/workflows demo loads sample agents that honour Stop', async ($, on) => {
     return kids.some(c => c?.key === key || c?.props?.key === key) ? n as Node : kids.map(c => holder(c, key)).find(Boolean)
   }
   expect(holder(await pane.drawn(), 'gear-demo-3')?.props).toMatchObject({ width: 6, justifyContent: 'center', alignItems: 'center' })
-  // Narrow, on its own line under the label, the costliest effort is red too, not dim.
+  // Narrow, on its own line under the label, the costliest efforts keep their color, not dim.
   const narrow = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'terminal', component: 'Pane', requestId: 'workflow-monitor', props: { ...props, bodyColumns: 50 }, viewport: { columns: 50, rows: 60 } })
-  expect((await narrow.findAll({ text: 'Extra high' })).some(x => x.type === 'Text' && x.props.color === 'error' && !x.props.dimColor)).toBe(true)
+  expect((await narrow.findAll({ text: 'Max' })).some(x => x.type === 'Text' && x.props.color === 'error' && !x.props.dimColor)).toBe(true)
+  expect((await narrow.findAll({ text: 'Extra high' })).some(x => x.type === 'Text' && x.props.color === '#F0883E' && !x.props.dimColor)).toBe(true)
   expect(holder(await narrow.drawn(), 'gear-demo-3')?.props).toMatchObject({ width: 3 })
   await narrow.unmount()
   await pane.press({ key: 'gear-demo-4' })
@@ -373,23 +394,24 @@ test('a control keeps its press handle while the panes redraw around it', async 
     await pane.unmount()
   }
 
-  // The Inspect pane redraws as the agent's activity streams in; its Pause and Stop stay put.
+  // The transcript pane redraws as the agent's activity streams in; its Pause and Stop stay put.
   const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor', props, viewport: { columns: 110, rows: 40 } })
   await pane.press({ key: 'gear-agent-k' })
-  await pane.press({ key: 'activity-agent-k' })
+  await pane.press({ key: 'transcript-agent-k' })
   await pane.unmount()
   const inspect = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport: { columns: 110, rows: 40 } })
   const before = await inspect.drawn()
   const pause = handleOf(before, 'pause-agent-k')
   expect(typeof pause).toBe('number')
   await step(2)
-  expect(await inspect.find({ text: /39\.0k tok/ })).toBeTruthy()
+  expect(await inspect.find({ text: /39\.0k tokens/ })).toBeTruthy()
   const after = await inspect.drawn()
   expect(after).not.toEqual(before)
   expect(handleOf(after, 'pause-agent-k')).toBe(pause)
   // And a press on it still runs: Pause, then Resume.
   await inspect.press({ key: 'pause-agent-k' })
-  expect(await inspect.find({ text: /paused/ })).toBeTruthy()
+  expect(await inspect.find({ text: /^Paus(ed|ing…)$/ })).toBeTruthy()
+  expect((await inspect.find({ key: 'pause-agent-k' }))?.props.label).toBe('▶ Resume')
   await inspect.press({ key: 'pause-agent-k' })
   await inspect.unmount()
 })
@@ -465,7 +487,8 @@ test('finished cards close to Archived, come back, and can be removed for good',
   await pane.press({ key: 'gear-group-wf_a' })
   expect(await has('archive-wf_a')).toBe(false)
 
-  // Inspecting one of its agents, then removing the card: it leaves the monitor, and Inspect lets go.
+  // Viewing one of its agents' transcripts, then removing the card: it leaves the monitor, and the
+  // transcript pane lets go.
   await pane.press({ key: 'fold-wf_a' })
   await pane.press({ key: 'gear-agent-a1' })
   await pane.press({ key: 'gear-group-wf_a' })
@@ -473,7 +496,7 @@ test('finished cards close to Archived, come back, and can be removed for good',
   expect(await has('fold-wf_a')).toBe(false)
   expect(await has('archived-toggle')).toBe(false)
   const inspect = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport: { columns: 110, rows: 40 } })
-  expect(await inspect.find({ text: /Pick Inspect/ })).toBeTruthy()
+  expect(await inspect.find({ text: /Pick View transcript/ })).toBeTruthy()
   await inspect.unmount()
 
   // Remove all takes everything archived; the running workflow stays.
@@ -497,8 +520,9 @@ test('a group can sit on the board and under Archived at once, and starts afresh
   let clock = 14_000_000
   let n = 0
   let reuse: string | undefined
+  const titles: string[] = []
   on('clock.now', () => ({ value: (clock += 100) }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', (_$, e) => (titles.push(e.title ?? ''), { value: { isPlaced: true } }))
   on('tool.call', () => ({ result: 'launched' }))
   on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: reuse ?? `agent-s${++n}` }))
   on('turn.complete', () => ({ text: 'ok' }))
@@ -515,11 +539,14 @@ test('a group can sit on the board and under Archived at once, and starts afresh
   const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor', props, viewport: { columns: 110, rows: 60 } })
   const has = async (key: string) => !!(await pane.find({ key }))
 
-  // Archiving the card of the agent Inspect shows leaves Inspect on it (only Remove lets go).
+  // Archiving the card of the agent whose transcript is open leaves the pane on it (only Remove lets
+  // go). The pane is titled with the agent's description, as Claude Code's own is.
   await pane.press({ key: 'gear-agent-s1' })
+  expect(titles.at(-1)).toBe('investigate:part-1')
   await pane.press({ key: 'close-subagents' })
   const inspect = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport: { columns: 110, rows: 40 } })
-  expect(await inspect.find({ text: /part-1/ })).toBeTruthy()
+  expect(await inspect.find({ text: /Pick View transcript/ })).toBeFalsy()
+  expect(await inspect.find({ text: '✓ Completed' })).toBeTruthy()
   await inspect.unmount()
 
   // A new subagent gets a card of its own while the earlier one stays archived.
@@ -550,7 +577,8 @@ test('a group can sit on the board and under Archived at once, and starts afresh
 
   // A workflow removed and started again gets a fresh card, without the model it had set.
   await spawn(1, 'wf_r') // agent-s3
-  await pane.press({ key: 'fold-wf_r::Investigate' })
+  // Folded by a click on its header (its press region, on the desktop).
+  await pane.post({ toggle: 'wf_r::Investigate' }, { in: 'hit-wf_r::Investigate' })
   expect(await has('cols-wf_r-Investigate')).toBe(false)
   await pane.press({ key: 'gear-group-wf_r' })
   await pane.select({ key: 'model-group-wf_r', value: 'claude-haiku-5-5' })
@@ -702,25 +730,6 @@ test('a card\'s status chip says where its group stands, at any width', async ($
       : ((n as Drawn)?.children ?? []).map(walk).find(Boolean))
     return walk(await pane.drawn())?.hover
   }
-  expect(await head()).toMatchObject({ backgroundColor: '#8080801f', paddingY: 1, borderStyle: 'single', borderColor: '#00000000' })
-  expect(await hoverOf('head-wf_c-Investigate')).toBeUndefined()
-  expect((await pane.find({ key: 'count-wf_c::Investigate' }))?.props.label).toBe('0/5')
-  expect((await pane.find({ key: 'fold-wf_c::Investigate' }))?.props.label).toBe('\u00a0▾\u00a0')
-  expect((await pane.findAll({ text: 'Tokens' })).some(x => x.type === 'Text' && x.props.color === '#8C929C')).toBe(true)
-  // It folds by its chevron to its header and squares, unfilled until the pointer is on it, and unfolds again.
-  await pane.press({ key: 'fold-wf_c::Investigate' })
-  expect(await isOpen('wf_c')).toBe(false)
-  expect(await pane.find({ key: 'bar-wf_c-Investigate' })).toBeTruthy()
-  expect((await head())?.backgroundColor).toBeUndefined()
-  expect(await hoverOf('head-wf_c-Investigate')).toEqual({ backgroundColor: '#8080801f' })
-  expect((await pane.find({ key: 'fold-wf_c::Investigate' }))?.props.label).toBe('\u00a0▸\u00a0')
-  await pane.press({ key: 'fold-wf_c::Investigate' })
-  expect(await isOpen('wf_c')).toBe(true)
-  // Its count folds it too.
-  await pane.press({ key: 'count-wf_c::Investigate' })
-  expect(await isOpen('wf_c')).toBe(false)
-  await pane.press({ key: 'count-wf_c::Investigate' })
-  expect(await isOpen('wf_c')).toBe(true)
   // What holds a node: the Box around it.
   const holderOf = async (p: typeof pane, key: string) => {
     type Node = { key?: string; props?: Record<string, unknown>; children?: unknown[] }
@@ -730,19 +739,32 @@ test('a card\'s status chip says where its group stands, at any width', async ($
     }
     return walk(await p.drawn())?.props
   }
+  // As much air above and below as at the sides: a fraction of a row, a row being half a line.
+  expect(await head()).toMatchObject({ backgroundColor: '#8080801f', paddingX: 1, paddingY: 0.4, borderStyle: 'single', borderColor: '#00000000' })
+  expect(await hoverOf('head-wf_c-Investigate')).toBeUndefined()
+  expect((await pane.findAll({ text: 'Tokens' })).some(x => x.type === 'Text' && x.props.color === '#8C929C')).toBe(true)
   // A click anywhere on the header folds it, through a see-through region laid over the whole
-  // header; so its name is plain text, flush with the squares under it, not a button.
+  // header; so its name, count and chevron are plain text, not buttons: the name flush with the
+  // squares under it and the box's left edge, the count and chevron with its right edge.
   const hit = 'hit-wf_c::Investigate'
-  expect(await pane.find({ key: 'phase-wf_c::Investigate' })).toBeFalsy()
+  for (const key of ['phase-', 'count-', 'fold-']) expect(await pane.find({ key: `${key}wf_c::Investigate` })).toBeFalsy()
   expect((await pane.findAll({ text: 'Investigate' })).some(x => x.type === 'Text' && x.props.color === undefined)).toBe(true)
+  expect((await pane.findAll({ text: '0/5' })).some(x => x.type === 'Text' && x.props.dimColor)).toBe(true)
+  expect((await pane.findAll({ text: '▾' })).some(x => x.type === 'Text' && x.props.dimColor)).toBe(true)
   expect(await holderOf(pane, hit)).toMatchObject({ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 })
   await pane.resize({ columns: 100, rows: 3, in: hit })
   const click = async (x: number, y: number, upY = y) => {
     await pane.pointer({ type: 'down', x, y, button: 'left', in: hit })
     await pane.pointer({ type: 'up', x, y: upY, button: 'left', in: hit })
   }
+  // It folds to its header and squares, unfilled until the pointer is on it, its chevron turned,
+  // and unfolds again.
   await click(60, 2)
   expect(await isOpen('wf_c')).toBe(false)
+  expect(await pane.find({ key: 'bar-wf_c-Investigate' })).toBeTruthy()
+  expect((await head())?.backgroundColor).toBeUndefined()
+  expect(await hoverOf('head-wf_c-Investigate')).toEqual({ backgroundColor: '#8080801f' })
+  expect((await pane.findAll({ text: '▸' })).some(x => x.type === 'Text' && x.props.dimColor)).toBe(true)
   await click(1, 0)
   expect(await isOpen('wf_c')).toBe(true)
   // The header's unfinished last row and column, past the whole cells the region counts, take it too.
@@ -766,9 +788,11 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   expect(await isOpen('wf_c')).toBe(true)
   // The table sits a little below its header.
   expect(await holderOf(pane, 'cols-wf_c-Investigate')).toMatchObject({ marginTop: 1 })
-  // The chevron sits centred in the row buttons' column, on either surface.
-  expect(await holderOf(pane, 'fold-wf_c::Investigate')).toMatchObject({ width: 6, justifyContent: 'center' })
+  // A row's button sits centred in a column wide enough for the desktop's native button.
   expect(await holderOf(pane, 'gear-agent-c1')).toMatchObject({ width: 6, justifyContent: 'center' })
+  // A phase not started yet: its chevron faint, at the same right edge, and no region over it.
+  expect((await pane.findAll({ text: '▸' })).some(x => x.type === 'Text' && x.props.color === '#8C929C')).toBe(true)
+  expect(await pane.find({ key: 'hit-wf_c::Critique' })).toBeFalsy()
   // On the terminal: no fill, padding or border on the header, the headings dim, and the chevron in
   // the three-cell column of the rows' buttons.
   const plain = await mount(110, 'terminal')
@@ -776,15 +800,23 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   expect(plainHead).toBeTruthy()
   expect([plainHead?.backgroundColor, plainHead?.borderStyle, plainHead?.paddingY]).toEqual([undefined, undefined, undefined])
   expect((await plain.findAll({ text: 'Tokens' })).some(x => x.type === 'Text' && x.props.dimColor)).toBe(true)
+  expect((await plain.find({ key: 'count-wf_c::Investigate' }))?.props.label).toBe('0/5')
+  expect((await plain.find({ key: 'fold-wf_c::Investigate' }))?.props.label).toBe(' ▾ ')
   expect(await holderOf(plain, 'fold-wf_c::Investigate')).toMatchObject({ width: 3, justifyContent: 'center' })
-  // There the name is the button that folds it, no region lies over the header, and the table
-  // follows it straight away.
+  // There the name, the count and the chevron are the buttons that fold it, no region lies over
+  // the header, and the table follows it straight away.
   expect(await plain.find({ key: hit })).toBeFalsy()
   expect(await holderOf(plain, 'cols-wf_c-Investigate')).toMatchObject({ marginTop: 0 })
-  await plain.press({ key: 'phase-wf_c::Investigate' })
-  expect(await isOpen('wf_c')).toBe(false)
-  await plain.press({ key: 'phase-wf_c::Investigate' })
-  expect(await isOpen('wf_c')).toBe(true)
+  for (const key of ['phase-', 'count-', 'fold-']) {
+    await plain.press({ key: `${key}wf_c::Investigate` })
+    expect(await isOpen('wf_c')).toBe(false)
+    await plain.press({ key: `${key}wf_c::Investigate` })
+    expect(await isOpen('wf_c')).toBe(true)
+  }
+  // Folded there, its chevron turns.
+  await plain.press({ key: 'fold-wf_c::Investigate' })
+  expect((await plain.find({ key: 'fold-wf_c::Investigate' }))?.props.label).toBe(' ▸ ')
+  await plain.press({ key: 'fold-wf_c::Investigate' })
   await plain.unmount()
 
   // agent-c1..c5: two still working, one done, one failed, one stopped.
@@ -970,7 +1002,7 @@ test('agent rows hide no column at any width, cutting the name short, then go on
     const seen = {
       // Column form: every header; two lines: none of them.
       columns: headers.every(Boolean) ? true : headers.some(Boolean) ? 'some' : false,
-      effort: (await pane.findAll({ text: 'Extra high' })).some(x => x.type === 'Text' && x.props.color === 'error'),
+      effort: (await pane.findAll({ text: 'Extra high' })).some(x => x.type === 'Text' && x.props.color === '#F0883E'),
       // Each agent's own cost, dim (the card's total is bold).
       cost: (await pane.findAll({ text: /^\$\d/ })).some(x => x.type === 'Text' && x.props.dimColor),
       // The agent's name ends in an ellipsis where its column is short, rather than wrapping.
@@ -1120,7 +1152,7 @@ test('a pause that can\'t wait on the host is lifted, saying so, instead of seem
   expect(tried.length).toBe(4)
   expect(tried[1]?.[0]).toBe('powershell')
   expect(await pane.find({ text: /pausing…/ })).toBeFalsy()
-  await pane.press({ key: 'activity-agent-n' })
+  await pane.press({ key: 'transcript-agent-n' })
   const view = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'terminal', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport })
   expect(await view.find({ text: /The pause couldn’t hold this agent/ })).toBeTruthy()
   await view.unmount()
@@ -1196,7 +1228,7 @@ test('agents it didn\'t see start join their cards: a stalled agent\'s retry, an
   expect(await chip()).toBe('● 1 · ⏹ 1')
   expect(await pane.find({ text: /Ended by Claude Code/ })).toBeFalsy()
 
-  // Its Inspect view says what happened, and so does the retry's.
+  // Its transcript says what happened, and so does the retry's.
   await pane.press({ key: 'gear-agent-r1' })
   let view = await mountInspect()
   expect(await view.find({ text: 'Ended by Claude Code after 12m 00s without progress; retried as “investigate:payments (retry 1)”.' })).toBeTruthy()
@@ -1207,7 +1239,7 @@ test('agents it didn\'t see start join their cards: a stalled agent\'s retry, an
   expect(await view.find({ text: /after 12m 00s without progress; retried as “investigate:payments \(retry 1\)”/ })).toBeTruthy()
   await view.unmount()
   await pane.press({ key: 'gear-agent-x2' })
-  await pane.press({ key: 'activity-agent-x2' })
+  await pane.press({ key: 'transcript-agent-x2' })
   view = await mountInspect()
   expect(await view.find({ text: 'Started by Claude Code after “investigate:payments” made no progress.' })).toBeTruthy()
   await view.unmount()
@@ -1257,5 +1289,207 @@ test('agents it didn\'t see start join their cards: a stalled agent\'s retry, an
   files[`${dir}/subagents/agent-agent-p2.meta.json`] = JSON.stringify({ agentType: 'Explore', description: 'Map the checkout module', toolUseId: 'toolu_p' })
   await step('agent-p2')
   expect(await pane.find({ text: /Map the checkout module \(retry 1\)/ })).toBeTruthy()
+  await pane.unmount()
+})
+
+test('View transcript reads an agent\'s own transcript, as Claude Code\'s own view draws it; its phase is the one it ran in', async ($, on) => {
+  const clock = mock.clock(on, { now: 60_000_000 })
+  let n = 0
+  const titles: string[] = []
+  on('ui.open', (_$, e) => (titles.push(e.title ?? ''), { value: { isPlaced: true } }))
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: `agent-t${++n}` }))
+  on('turn.complete', () => ({ text: 'ok' }))
+  on('turn.step', async function* (_$, e) {
+    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: USAGE }
+  })
+  // The session's files as Claude Code keeps them (see the test on agents it didn't see start).
+  const dir = 'C:/u/.claude/projects/repo/sess'
+  const files: Record<string, string> = {}
+  // A file said to be bigger than it is here, past what fs.read takes: only the host's own reader
+  // reads it, and it comes in pieces.
+  const sizes: Record<string, number> = {}
+  const norm = (path: string) => path.replace(/\\/g, '/')
+  const missing = (path: string): never => { throw new Error(`ENOENT: no such file, ${path}`) }
+  const tooBig = (path: string): never => { throw new Error(`EFBIG: file over 4 MiB, ${path}`) }
+  on('fs.read', (_$, e) => (!(norm(e.path) in files) ? missing(e.path)
+    : (sizes[norm(e.path)] ?? 0) > 4 * 1024 * 1024 ? tooBig(e.path)
+    : { value: files[norm(e.path)] ?? '' }))
+  on('fs.exists', (_$, e) => ({ value: norm(e.path) in files }))
+  on('fs.stat', (_$, e) => (norm(e.path) in files
+    ? { value: { kind: 'file' as const, size: sizes[norm(e.path)] ?? files[norm(e.path)]?.length ?? 0, mtimeMs: clock.now(), isLink: false } }
+    : missing(e.path)))
+  on('fs.list', () => ({ value: [] }))
+  const streamed: string[] = []
+  on('process.spawn', async function* (_$, e) {
+    const path = norm(e.argv.at(-1) ?? '')
+    streamed.push(path)
+    const text = files[path]
+    if (text === undefined) return { value: { code: 1, signal: null } }
+    yield { stream: 'stdout' as const, text: text.slice(0, 7) }
+    yield { stream: 'stdout' as const, text: text.slice(7) }
+    return { value: { code: 0, signal: null } }
+  })
+  on('tool.call', (_$, e) => ({
+    result: e.tool === 'Workflow'
+      ? { status: 'async_launched', runId: 'wf_t', workflowName: 'native-transcript-spec', scriptPath: `${dir}/workflows/scripts/native-transcript-spec-wf_t.js` }
+      : 'ok',
+  }))
+  // A plain subagent's transcript the session hands over.
+  on('session.messages', (_$, e) => (e.agentId === 'agent-t2'
+    ? {
+      value: [
+        { role: 'user' as const, text: 'Review the diff.', toolUses: [] },
+        { role: 'assistant' as const, text: '', toolUses: [{ tool_use_id: 'h1', tool: 'Bash', input: { command: 'git diff' }, text: 'diff' }] },
+        { role: 'assistant' as const, text: '', toolUses: [{ tool_use_id: 'h2', tool: 'SubagentHandback', input: { message: 'No **defects** found.' }, text: 'ok' }] },
+      ],
+    }
+    : { value: { deny: `no transcript for ${e.agentId}` } }))
+
+  // A run whose script names one phase, Extract, and an agent of it named spec:view, which Claude
+  // Code's meta says runs in Extract.
+  files[`${dir}/workflows/scripts/native-transcript-spec-wf_t.js`] = `export const meta = {
+  name: 'native-transcript-spec',
+  description: 'Extract the native layout',
+  phases: [{ title: 'Extract' }],
+}
+phase('Extract')`
+  await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_t', input: {} })
+  files[`${dir}/subagents/workflows/wf_t/agent-agent-t1.meta.json`] = JSON.stringify({ agentType: 'workflow-subagent', description: 'spec:view', workflowPhase: 'Extract' })
+  await $.agent.spawn({
+    tool_use_id: 'toolu_t', prompt: 'p', description: 'spec:view', subagentType: 'general-purpose',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false,
+    workflow: { runId: 'wf_t', agentIndex: 1 },
+  })
+  const viewport = { columns: 110, rows: 60 }
+  const props = { title: 'Workflows', isFocused: false, bodyColumns: 110 }
+  const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor', props, viewport })
+  // It sits under Extract, started (its header takes a click), not under a "Spec" of its label's.
+  expect(await pane.find({ key: 'head-wf_t-Extract' })).toBeTruthy()
+  expect(await pane.find({ key: 'hit-wf_t::Extract' })).toBeTruthy()
+  expect(await pane.find({ key: 'head-wf_t-Spec' })).toBeFalsy()
+
+  // Its transcript file: the harness's relay of the person's request and a reminder, which aren't
+  // its prompt; the computed task, which is (indented by the harness); then its work.
+  const prompt = `Find the native strings.\n\n${'Read the bundles. '.repeat(80).trim()}`
+  const line = (type: string, content: unknown, extra: Record<string, unknown> = {}) => JSON.stringify({ type, ...extra, message: { role: type, content } })
+  const use = (id: string, name: string, input: Record<string, unknown>) => line('assistant', [{ type: 'tool_use', id, name, input }])
+  const result = (id: string, isError = false) => line('user', [{ type: 'tool_result', tool_use_id: id, content: 'out', is_error: isError }])
+  const path = `${dir}/subagents/workflows/wf_t/agent-agent-t1.jsonl`
+  const write = (...lines: string[]) => { files[path] = [...lines, ''].join('\n') }
+  const work = [
+    line('user', '[Workflow harness — user request] The harness relays the request:\n  Make it look native.'),
+    line('user', `[Workflow harness — computed task] The computed task text follows:\n${prompt.split('\n').map(l => `  ${l}`).join('\n')}`),
+    line('user', '<system-reminder>\nReport through StructuredOutput.\n</system-reminder>', { isMeta: true }),
+    line('assistant', [{ type: 'thinking', thinking: '', signature: 's' }]),
+    use('u1', 'Bash', { command: 'ls', description: 'List the bundles' }), result('u1'),
+    use('u2', 'Bash', { command: 'grep -c x f.js' }), result('u2', true),
+    line('assistant', [{ type: 'text', text: 'Found the **strings**.' }]),
+    use('u3', 'Read', { file_path: 'C:/b/f_01.js' }), result('u3'),
+    use('u4', 'Edit', { file_path: 'C:/b/f_01.js', old_string: 'a', new_string: 'b' }), result('u4'),
+    use('u5', 'mcp__docs__search_pages', { query: 'transcript' }),
+  ]
+  // At first only its first run, its last call failed: not said while the run may go on.
+  write(...work.slice(0, 8))
+  await pane.press({ key: 'gear-agent-t1' })
+  await pane.press({ key: 'transcript-agent-t1' })
+  expect(titles.at(-1)).toBe('spec:view')
+  const view = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport })
+  const md = async () => (await view.findAll({ type: 'Markdown' })).map(x => x.props.text as string)
+  const label = async (key: string) => (await view.find({ key }))?.props.label
+  expect(await label('steps-agent-t1:u1')).toBe('Ran 2 commands ›')
+  // The rest of its work, drawn at the next redraw (a press below).
+  write(...work)
+  // Its model and effort; Pause and Stop while it runs.
+  expect(await view.find({ text: 'Opus 5.5' })).toBeTruthy()
+  expect(await view.find({ key: 'stop-agent-t1' })).toBeTruthy()
+  // The prompt, un-indented, cut to a dozen lines past 1200 characters until Show more.
+  expect((await md())[0]).toBe(prompt)
+  expect((await md()).some(t => t.includes('Make it look native') || t.includes('StructuredOutput'))).toBe(false)
+  expect((await view.find({ key: 'prompt-body' }))?.props).toMatchObject({ height: 24, overflow: 'hidden' })
+  expect(await label('more-agent-t1')).toBe('Show more')
+  await view.press({ key: 'more-agent-t1' })
+  expect((await view.find({ key: 'prompt-body' }))?.props.height).toBeUndefined()
+  expect(await label('more-agent-t1')).toBe('Show less')
+  await view.press({ key: 'more-agent-t1' })
+  // Each run of tool calls in a line, worded as Claude Code's own (a failed last call said, its run
+  // over); its reply between them; files touched alike counted as one; tools of no kind it names last.
+  expect(await label('steps-agent-t1:u1')).toBe('Ran 2 commands (a tool failed) ›')
+  expect(await md()).toContain('Found the **strings**.')
+  expect(await label('steps-agent-t1:u3')).toBe('Read and edited f_01.js, used a tool ›')
+  // Unfolded, a line a call: what it did, to what, and whether it failed.
+  await view.press({ key: 'steps-agent-t1:u1' })
+  expect(await view.find({ text: /^List the bundles$/ })).toBeTruthy()
+  expect(await view.find({ text: /^grep -c x f\.js \(failed\)$/ })).toBeTruthy()
+  await view.press({ key: 'steps-agent-t1:u1' })
+  expect(await view.find({ text: /List the bundles/ })).toBeFalsy()
+  // What it does now, the call still waiting on its result; and its totals.
+  expect(await view.find({ text: 'Using search pages…' })).toBeTruthy()
+  expect(await view.find({ text: /^5 tool calls · 0 tokens · $/ })).toBeTruthy()
+
+  // It answers through StructuredOutput and ends: its answer after its work, how it ended, no
+  // Pause or Stop, and nothing doing.
+  await clock.advance(5000)
+  write(...work, result('u5'), use('u6', 'StructuredOutput', { summary: 'ok', strings: ['Show more'] }), result('u6'))
+  await $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 't-agent-t1', agentId: 'agent-t1', reason: 'answer' })
+  expect(await label('steps-agent-t1:u3')).toBe('Read and edited f_01.js, used 2 tools ›')
+  // A field of text read as markdown under its name, anything else as JSON.
+  expect((await md()).at(-1)).toBe('**summary**\n\nok\n\n**strings**\n\n```json\n[\n  "Show more"\n]\n```')
+  expect(await view.find({ text: '✓ Completed' })).toBeTruthy()
+  expect(await view.find({ key: 'stop-agent-t1' })).toBeFalsy()
+  expect(await view.find({ text: /…$/ })).toBeFalsy()
+  expect(await view.find({ text: /^6 tool calls · / })).toBeTruthy()
+
+  // A plain subagent's transcript, which the session hands over: its report handed back through a
+  // tool is its answer, and that call counts among its tools.
+  await $.agent.spawn({
+    tool_use_id: 'toolu_p', prompt: 'p', description: 'Review the diff', subagentType: 'general-purpose',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false,
+  })
+  await $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 't-agent-t2', agentId: 'agent-t2', reason: 'answer' })
+  // (A finished card comes folded.)
+  await pane.press({ key: 'fold-subagents' })
+  await pane.press({ key: 'gear-agent-t2' })
+  expect(titles.at(-1)).toBe('Review the diff')
+  expect(await md()).toEqual(['Review the diff.', 'No **defects** found.'])
+  expect(await label('steps-agent-t2:h1')).toBe('Ran a command, used a tool ›')
+  expect(await view.find({ text: /No result/ })).toBeFalsy()
+
+  // Removing the card forgets what was unfolded in its transcripts.
+  await view.press({ key: 'steps-agent-t2:h1' })
+  expect(await label('steps-agent-t2:h1')).toBe('Ran a command, used a tool ⌄')
+  await pane.press({ key: 'gear-group-subagents' })
+  await pane.press({ key: 'remove-subagents' })
+  expect(await view.find({ text: /Pick View transcript/ })).toBeTruthy()
+  await view.unmount()
+
+  // An agent whose meta isn't written yet as it starts goes by its label until a request of its
+  // finds the meta there.
+  await $.agent.spawn({
+    tool_use_id: 'toolu_t', prompt: 'p', description: 'spec:groups', subagentType: 'general-purpose',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false,
+    workflow: { runId: 'wf_t', agentIndex: 2 },
+  })
+  expect(await pane.find({ key: 'head-wf_t-Spec' })).toBeTruthy()
+  files[`${dir}/subagents/workflows/wf_t/agent-agent-t3.meta.json`] = JSON.stringify({ agentType: 'workflow-subagent', description: 'spec:groups', workflowPhase: 'Extract' })
+  for await (const _ of $.turn.step({ turnId: 't-agent-t3', index: 0, model: 'claude-opus-5-5', effort: 'high', messageCount: 1, agentId: 'agent-t3' })) { /* read on */ }
+  expect(await pane.find({ key: 'head-wf_t-Spec' })).toBeFalsy()
+  expect(await pane.find({ key: 'head-wf_t-Extract' })).toBeTruthy()
+
+  // Its transcript is past fs.read's 4 MiB: the host's own reader reads it. It ends on a reply, but
+  // the run failed it (no result returned to its script): a reply isn't an answer then.
+  const big = `${dir}/subagents/workflows/wf_t/agent-agent-t3.jsonl`
+  files[big] = [
+    line('user', '[Workflow harness — computed task] Group the strings:\n  Sort them by pane.'),
+    line('assistant', [{ type: 'text', text: 'I could not sort them.' }]),
+  ].join('\n')
+  sizes[big] = 5 * 1024 * 1024
+  await $.turn.complete({ answer: '', durationMs: 1000, isAborted: false, turnId: 't-agent-t3', agentId: 'agent-t3', reason: 'error' })
+  // (A finished row's ↗ opens its transcript.)
+  await pane.press({ key: 'gear-agent-t3' })
+  const failed = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport })
+  expect(streamed).toContain(big)
+  expect((await failed.findAll({ type: 'Markdown' })).map(x => x.props.text)).toEqual(['Sort them by pane.', 'I could not sort them.'])
+  expect(await failed.find({ text: 'No result — task failed' })).toBeTruthy()
+  await failed.unmount()
   await pane.unmount()
 })
