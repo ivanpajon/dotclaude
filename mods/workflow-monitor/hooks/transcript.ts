@@ -2,7 +2,7 @@ import type { SessionMessage } from 'claude-code'
 
 import type { LogEntry } from '../types'
 
-// An agent's transcript as the View transcript pane draws it, as Claude Code's own does for a
+// An agent's transcript as the Inspect pane draws it, as Claude Code's own does for a
 // subagent: the prompt it was given, then its replies in order, each run of tool calls between
 // them folded into one line ("Ran 10 commands, used a tool"), and its answer last.
 

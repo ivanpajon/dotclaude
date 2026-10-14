@@ -107,7 +107,7 @@ test('tracks a workflow agent, applies overrides, and pauses, stops and inspects
   expect(sent.at(-1)).toEqual({ model: 'claude-haiku-5-5', effort: 'max' })
   await $.ui.select({ plugin: 'workflow-monitor', key: 'effort-agent-2', value: 'low' })
 
-  // View transcript shows its model, replies and tool calls: here from the stream the monitor kept
+  // Inspect shows its model, replies and tool calls: here from the stream the monitor kept
   // (the agent's own transcript is a file, see the test on it), its thinking dim.
   await pane.press({ key: 'transcript-agent-2' })
   for (const surface of SURFACES) {
@@ -501,7 +501,7 @@ test('finished cards close to Archived, come back, and can be removed for good',
   expect(await has('fold-wf_a')).toBe(false)
   expect(await has('archived-toggle')).toBe(false)
   const inspect = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport: { columns: 110, rows: 40 } })
-  expect(await inspect.find({ text: /Pick View transcript/ })).toBeTruthy()
+  expect(await inspect.find({ text: /Pick Inspect/ })).toBeTruthy()
   await inspect.unmount()
 
   // Remove all takes everything archived; the running workflow stays.
@@ -550,7 +550,7 @@ test('a group can sit on the board and under Archived at once, and starts afresh
   expect(titles.at(-1)).toBe('investigate:part-1')
   await pane.press({ key: 'close-subagents' })
   const inspect = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport: { columns: 110, rows: 40 } })
-  expect(await inspect.find({ text: /Pick View transcript/ })).toBeFalsy()
+  expect(await inspect.find({ text: /Pick Inspect/ })).toBeFalsy()
   expect(await inspect.find({ text: '✓ Completed' })).toBeTruthy()
   await inspect.unmount()
 
@@ -1297,7 +1297,7 @@ test('agents it didn\'t see start join their cards: a stalled agent\'s retry, an
   await pane.unmount()
 })
 
-test('View transcript reads an agent\'s own transcript, as Claude Code\'s own view draws it; its phase is the one it ran in', async ($, on) => {
+test('Inspect reads an agent\'s own transcript, as Claude Code\'s own view draws it; its phase is the one it ran in', async ($, on) => {
   const clock = mock.clock(on, { now: 60_000_000 })
   let n = 0
   const titles: string[] = []
@@ -1479,7 +1479,7 @@ phase('Extract')`
   expect(await label('steps-agent-t2:h1')).toBe('Ran a command, used a tool ⌄')
   await pane.press({ key: 'gear-group-subagents' })
   await pane.press({ key: 'remove-subagents' })
-  expect(await view.find({ text: /Pick View transcript/ })).toBeTruthy()
+  expect(await view.find({ text: /Pick Inspect/ })).toBeTruthy()
   await view.unmount()
 
   // An agent whose meta isn't written yet as it starts goes by its label until a request of its

@@ -25,7 +25,7 @@ const USAGE = [
     + ' model or effort is set.',
   '- **↗** opens a finished agent\'s transcript in another tab, as Claude Code\'s own View transcript does: the'
     + ' prompt it was given, its replies, each run of tool calls summed up in a line that unfolds, and its answer.'
-    + ' For a running agent, View transcript is in its settings panel and follows along live.',
+    + ' For a running agent, Inspect is in its settings panel and follows along live.',
   '- **✕** removes a finished workflow from the board. It isn\'t deleted: it moves under **Archived** at the bottom,'
     + ' where Restore brings it back and Remove deletes it from the monitor for good. If the run starts again, it'
     + ' comes back by itself.',
@@ -1509,8 +1509,8 @@ export const register: Register = on => {
       const isOpen = open === `agent:${r.id}`
       const hasOverride = !!(own[r.id]?.model || own[r.id]?.effort)
       const accent = r.isOverridden ? 'merged' : undefined
-      // Running: the settings gear. Finished: View transcript's ↗, its one action left, straight to
-      // its transcript (perform() tells them apart). Padded with no-break spaces, which no surface trims: a
+      // Running: the settings gear. Finished: Inspect's ↗, its one action left, straight to its
+      // transcript (perform() tells them apart). Padded with no-break spaces, which no surface trims: a
       // wider target than the glyph alone, in a column wide enough for it (see gearCell).
       const icon = r.status !== 'running' ? '↗' : isOpen ? '▴' : hasOverride ? '◆' : '⚙'
       // A finished agent is drawn grey throughout, its icon aside, as Claude Code's own panel does.
@@ -1522,7 +1522,7 @@ export const register: Register = on => {
       const time = timer(`time-${r.id}`, worked(r), working(r) ? 1 : 0, over)
       // The costliest efforts stand out (see effortColor) while they still spend.
       const effortHue = accent ?? (over ? undefined : effortColor(r.effort))
-      // Pause and Stop while it runs (a panel left open when it finishes keeps only View transcript).
+      // Pause and Stop while it runs (a panel left open when it finishes keeps only Inspect).
       const settings = isOpen && editor(
         r.id,
         own[r.id] ?? {},
@@ -1532,7 +1532,7 @@ export const register: Register = on => {
             button(`pause-${r.id}`, paused ? '▶ Resume' : '⏸ Pause'),
             button(`stop-${r.id}`, stopping ? '⏹ Stopping…' : '⏹ Stop'),
           ] : []),
-          button(`transcript-${r.id}`, 'View transcript'),
+          button(`transcript-${r.id}`, '↗ Inspect'),
         ],
       )
 
@@ -1885,7 +1885,7 @@ export const register: Register = on => {
     const list = await read($, agents)
     const r = list.find(a => a.id === id)
     if (!id || !r) {
-      return <Box paddingX={1}><Text dimColor>Pick View transcript on an agent in the Workflows pane.</Text></Box>
+      return <Box paddingX={1}><Text dimColor>Pick Inspect on an agent in the Workflows pane.</Text></Box>
     }
     const gui = e.surface !== 'terminal'
     const faint = gui ? { color: HEADING } : { dimColor: true }

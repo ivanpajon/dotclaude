@@ -88,13 +88,13 @@ On a **running agent's row**, ⚙ opens a panel under it with:
 - **Pause / Resume.** Pause holds the agent at its next tool call until you resume it, so it stops between steps without losing anything. A model request already under way finishes first, and an agent that answers without calling a tool finishes instead of waiting. It waits at a tool call because Claude Code ends a background or workflow agent that shows no progress for 10 minutes (and starts it again), and a tool call that is still running doesn't count as no progress. While it waits, the monitor runs a short sleeper process (`ping` on Windows, `sleep` elsewhere) every 30 seconds, since a hook can't otherwise wait more than 10 seconds. If no wait process will start, the pause is lifted instead of seeming to hold: a toast and a note in its transcript say so.
 - **Stop.** Ends the agent now: its next request is answered with a final reply in the model's place, and further tool calls are refused, so it winds down cleanly.
 - **Model** and **Effort** pickers. They apply from the agent's next request.
-- **View transcript**, to open its transcript.
+- **↗ Inspect**, to open its transcript.
 
 On a **card's header**, ⚙ opens the same for the whole group: **Pause all / Resume all**, **Stop all**, and a model and effort for every agent in it, including agents the workflow starts later. An agent's own setting wins over the card's. Once nothing in the card is running, **Archive** and **Remove** take the place of Pause all and Stop all. The model and effort pickers stay while the workflow may still start agents (between phases), and on the Subagents card, which new subagents can join at any time. Once a workflow has ended (done, failed or stopped), they are hidden: there is nothing left for them to apply to.
 
 The icon shows **◆** while a model or effort is set and can still apply, and **▴** while its panel is open.
 
-### ↗ View transcript
+### ↗ Inspect
 
 Opens the agent's transcript in another tab, titled with its description and laid out like Claude Code's own **View transcript** for a subagent:
 
