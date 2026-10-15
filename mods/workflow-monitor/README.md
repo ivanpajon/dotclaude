@@ -96,7 +96,7 @@ The icon shows **◆** while a model or effort is set and can still apply, and *
 
 ### ↗ Inspect
 
-Opens the agent's transcript in another tab, titled with its description and laid out like Claude Code's own **View transcript** for a subagent:
+Opens the agent's transcript in a tab of its own, titled with its description. Each agent gets its own tab, so several transcripts can be open at once; Inspect on an agent whose tab is already open reuses that tab, and removing an agent from the monitor closes it. The transcript is laid out like Claude Code's own **View transcript** for a subagent:
 
 - **Model** and **Effort** on top. While the agent runs, **Pause** and **Stop** sit beside them; once it is over, how it ended (Completed, Stopped or Failed).
 - **The prompt** it was given, in a filled box. A prompt over 1200 characters is cut to about twelve lines, with **Show more** to read it whole. For a workflow agent this is the task its script computed. The harness's copy of your request and Claude Code's reminders are left out.

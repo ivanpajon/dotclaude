@@ -117,8 +117,8 @@ declare module 'claude-code' {
       held: Record<string, boolean>
       /** The latest activity of each agent, by agent id, capped. */
       logs: Record<string, LogEntry[]>
-      /** The agent the transcript pane shows. */
-      inspecting: string | null
+      /** The transcript panes open, one per agent: the agent each shows, by pane id. */
+      inspected: Record<string, string>
       /**
        * Parts of a transcript the person unfolded: `<agent id>:prompt`, its prompt shown whole, and
        * `<agent id>:<call id>`, the run of tool calls that call opens listed.

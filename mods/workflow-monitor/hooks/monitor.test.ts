@@ -111,7 +111,7 @@ test('tracks a workflow agent, applies overrides, and pauses, stops and inspects
   // (the agent's own transcript is a file, see the test on it), its thinking dim.
   await pane.press({ key: 'transcript-agent-2' })
   for (const surface of SURFACES) {
-    const view = await $.ui.mount({ plugin: 'workflow-monitor', surface, component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport })
+    const view = await $.ui.mount({ plugin: 'workflow-monitor', surface, component: 'Pane', requestId: 'workflow-monitor-agent-agent-2', props, viewport })
     expect(await view.find({ text: 'Haiku 5.5' })).toBeTruthy()
     const md = (await view.findAll({ type: 'Markdown' })).map(x => [x.props.text, !!x.props.dimColor])
     expect(md).toContainEqual(['Checking the detail pages', true])
@@ -404,7 +404,7 @@ test('a control keeps its press handle while the panes redraw around it', async 
   await pane.press({ key: 'gear-agent-k' })
   await pane.press({ key: 'transcript-agent-k' })
   await pane.unmount()
-  const inspect = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport: { columns: 110, rows: 40 } })
+  const inspect = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent-agent-k', props, viewport: { columns: 110, rows: 40 } })
   const before = await inspect.drawn()
   const pause = handleOf(before, 'pause-agent-k')
   expect(typeof pause).toBe('number')
@@ -424,8 +424,10 @@ test('a control keeps its press handle while the panes redraw around it', async 
 test('finished cards close to Archived, come back, and can be removed for good', async ($, on) => {
   let clock = 13_000_000
   let n = 0
+  const closed: string[] = []
   on('clock.now', () => ({ value: (clock += 100) }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', (_$, e, next) => (closed.push(e.id), next(e)))
   on('tool.call', () => ({ result: 'launched' }))
   on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: `agent-a${++n}` }))
   on('turn.complete', () => ({ text: 'ok' }))
@@ -493,15 +495,16 @@ test('finished cards close to Archived, come back, and can be removed for good',
   expect(await has('archive-wf_a')).toBe(false)
 
   // Viewing one of its agents' transcripts, then removing the card: it leaves the monitor, and the
-  // transcript pane lets go.
+  // agent's transcript pane closes (one left open would show nothing of it).
   await pane.press({ key: 'fold-wf_a' })
   await pane.press({ key: 'gear-agent-a1' })
   await pane.press({ key: 'gear-group-wf_a' })
   await pane.press({ key: 'remove-wf_a' })
   expect(await has('fold-wf_a')).toBe(false)
   expect(await has('archived-toggle')).toBe(false)
-  const inspect = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport: { columns: 110, rows: 40 } })
-  expect(await inspect.find({ text: /Pick Inspect/ })).toBeTruthy()
+  expect(closed).toEqual(['workflow-monitor-agent-agent-a1'])
+  const inspect = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent-agent-a1', props, viewport: { columns: 110, rows: 40 } })
+  expect(await inspect.find({ text: /no longer in the monitor/ })).toBeTruthy()
   await inspect.unmount()
 
   // Remove all takes everything archived; the running workflow stays.
@@ -549,8 +552,8 @@ test('a group can sit on the board and under Archived at once, and starts afresh
   await pane.press({ key: 'gear-agent-s1' })
   expect(titles.at(-1)).toBe('investigate:part-1')
   await pane.press({ key: 'close-subagents' })
-  const inspect = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport: { columns: 110, rows: 40 } })
-  expect(await inspect.find({ text: /Pick Inspect/ })).toBeFalsy()
+  const inspect = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent-agent-s1', props, viewport: { columns: 110, rows: 40 } })
+  expect(await inspect.find({ text: /no longer in the monitor/ })).toBeFalsy()
   expect(await inspect.find({ text: '✓ Completed' })).toBeTruthy()
   await inspect.unmount()
 
@@ -875,6 +878,9 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   expect(await pane.find({ text: '0s', in: 'idle-wf_c' })).toBeTruthy()
   await pane.advance(65_000)
   expect(await pane.find({ text: '1m 05s', in: 'idle-wf_c' })).toBeTruthy()
+  // Past an hour it gives the seconds too, as Claude Code's own panel does.
+  await pane.advance(3_600_000)
+  expect(await pane.find({ text: '1h 01m 05s', in: 'idle-wf_c' })).toBeTruthy()
   expect(await frame('wf_c')).toEqual({ fill: '#80808014', desktopBorder: 'round #00000000', border: undefined, dim: true })
   // Between phases it may start more agents: its settings, still open from Stop all, can set a model for them.
   await pane.select({ key: 'model-group-wf_c', value: 'claude-haiku-5-5' })
@@ -1020,11 +1026,11 @@ test('agent rows hide no column at any width, cutting the name short, then go on
   expect(await at(110, 'desktop')).toEqual({ columns: true, ...all })
   // Narrower, the name gets what's left, 12 columns at the least (the desktop's row button takes
   // three more than the terminal's).
-  expect(await at(72, 'desktop')).toEqual({ columns: true, ...all })
-  expect(await at(69, 'terminal')).toEqual({ columns: true, ...all })
+  expect(await at(75, 'desktop')).toEqual({ columns: true, ...all })
+  expect(await at(72, 'terminal')).toEqual({ columns: true, ...all })
   // A column less and each agent goes on two lines, its effort and cost among the rest.
-  expect(await at(71, 'desktop')).toEqual({ columns: false, ...all })
-  expect(await at(68, 'terminal')).toEqual({ columns: false, ...all })
+  expect(await at(74, 'desktop')).toEqual({ columns: false, ...all })
+  expect(await at(71, 'terminal')).toEqual({ columns: false, ...all })
 })
 
 test('a workflow takes its name and phases from its launch, as the call\'s input reaches the mod empty', async ($, on) => {
@@ -1158,7 +1164,7 @@ test('a pause that can\'t wait on the host is lifted, saying so, instead of seem
   expect(tried[1]?.[0]).toBe('powershell')
   expect(await pane.find({ text: /pausing…/ })).toBeFalsy()
   await pane.press({ key: 'transcript-agent-n' })
-  const view = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'terminal', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport })
+  const view = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'terminal', component: 'Pane', requestId: 'workflow-monitor-agent-agent-n', props, viewport })
   expect(await view.find({ text: /The pause couldn’t hold this agent/ })).toBeTruthy()
   await view.unmount()
   await pane.unmount()
@@ -1223,7 +1229,7 @@ test('agents it didn\'t see start join their cards: a stalled agent\'s retry, an
   const viewport = { columns: 110, rows: 60 }
   const props = { title: 'Workflows', isFocused: false, bodyColumns: 110 }
   const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor', props, viewport })
-  const mountInspect = () => $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport })
+  const mountInspect = (agent: string) => $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: `workflow-monitor-agent-${agent}`, props, viewport })
   const shown = (node: unknown): string => (typeof node === 'string' ? node
     : ((node as { children?: unknown[] }).children ?? []).map(shown).join(''))
   const chip = async () => ((await pane.find({ key: 'status-wf_r' }))?.children ?? []).map(shown).filter(Boolean).join(' ')
@@ -1235,17 +1241,17 @@ test('agents it didn\'t see start join their cards: a stalled agent\'s retry, an
 
   // Its transcript says what happened, and so does the retry's.
   await pane.press({ key: 'gear-agent-r1' })
-  let view = await mountInspect()
+  let view = await mountInspect('agent-r1')
   expect(await view.find({ text: 'Ended by Claude Code after 12m 00s without progress; retried as “investigate:payments (retry 1)”.' })).toBeTruthy()
   await view.unmount()
   // Its own end, reported later, changes none of that.
   await $.turn.complete({ answer: '', durationMs: 1000, isAborted: true, turnId: 't-agent-r1', agentId: 'agent-r1', reason: 'aborted' })
-  view = await mountInspect()
+  view = await mountInspect('agent-r1')
   expect(await view.find({ text: /after 12m 00s without progress; retried as “investigate:payments \(retry 1\)”/ })).toBeTruthy()
   await view.unmount()
   await pane.press({ key: 'gear-agent-x2' })
   await pane.press({ key: 'transcript-agent-x2' })
-  view = await mountInspect()
+  view = await mountInspect('agent-x2')
   expect(await view.find({ text: 'Started by Claude Code after “investigate:payments” made no progress.' })).toBeTruthy()
   await view.unmount()
 
@@ -1258,7 +1264,7 @@ test('agents it didn\'t see start join their cards: a stalled agent\'s retry, an
   expect(await pane.find({ text: /investigate:payments \(retry 2\)/ })).toBeTruthy()
   expect(await chip()).toBe('⏸ 1… · ⏹ 2')
   await pane.press({ key: 'gear-agent-x2' })
-  view = await mountInspect()
+  view = await mountInspect('agent-x2')
   expect(await view.find({ text: 'Ended by Claude Code; retried as “investigate:payments (retry 2)”.' })).toBeTruthy()
   await view.unmount()
 
@@ -1271,7 +1277,7 @@ test('agents it didn\'t see start join their cards: a stalled agent\'s retry, an
   expect(await pane.find({ text: /investigate:payments \(retry 3\)/ })).toBeTruthy()
   expect(await chip()).toBe('⏸ 1… · ⏹ 3')
   await pane.press({ key: 'gear-agent-x3' })
-  view = await mountInspect()
+  view = await mountInspect('agent-x3')
   expect(await view.find({ text: 'Ended by Claude Code after 11m 00s without progress; retried as “investigate:payments (retry 3)”.' })).toBeTruthy()
   await view.unmount()
 
@@ -1301,7 +1307,10 @@ test('Inspect reads an agent\'s own transcript, as Claude Code\'s own view draws
   const clock = mock.clock(on, { now: 60_000_000 })
   let n = 0
   const titles: string[] = []
-  on('ui.open', (_$, e) => (titles.push(e.title ?? ''), { value: { isPlaced: true } }))
+  const opened: string[] = []
+  const closed: string[] = []
+  on('ui.open', (_$, e) => (titles.push(e.title ?? ''), opened.push(e.id), { value: { isPlaced: true } }))
+  on('ui.close', (_$, e, next) => (closed.push(e.id), next(e)))
   on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: `agent-t${++n}` }))
   on('turn.complete', () => ({ text: 'ok' }))
   on('turn.step', async function* (_$, e) {
@@ -1411,9 +1420,9 @@ phase('Extract')`
   await pane.press({ key: 'gear-agent-t1' })
   await pane.press({ key: 'transcript-agent-t1' })
   expect(titles.at(-1)).toBe('spec:view')
-  const view = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport })
-  const md = async () => (await view.findAll({ type: 'Markdown' })).map(x => x.props.text as string)
-  const label = async (key: string) => (await view.find({ key }))?.props.label
+  const view = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent-agent-t1', props, viewport })
+  const md = async (v = view) => (await v.findAll({ type: 'Markdown' })).map(x => x.props.text as string)
+  const label = async (key: string, v = view) => (await v.find({ key }))?.props.label
   expect(await label('steps-agent-t1:u1')).toBe('Ran 2 commands ▸')
   // The rest of its work, drawn at the next redraw (a press below).
   write(...work)
@@ -1460,7 +1469,7 @@ phase('Extract')`
   expect(await view.find({ text: /…$/ })).toBeFalsy()
   expect(await view.find({ text: /^6 tool calls · / })).toBeTruthy()
   // A time that no longer counts is plain text, here and in its row: no Client to fault.
-  expect(await view.find({ key: 'footer-time' })).toBeFalsy()
+  expect(await view.find({ key: 'footer-time-agent-t1' })).toBeFalsy()
   expect(await pane.find({ key: 'time-agent-t1' })).toBeFalsy()
 
   // A plain subagent's transcript, which the session hands over: its report handed back through a
@@ -1470,20 +1479,30 @@ phase('Extract')`
     provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false,
   })
   await $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 't-agent-t2', agentId: 'agent-t2', reason: 'answer' })
-  // (A finished card comes folded.)
+  // (A finished card comes folded.) It opens in a pane of its own, beside the first agent's, which
+  // stays on that agent; Inspect on an agent whose pane is open reuses that pane.
   await pane.press({ key: 'fold-subagents' })
   await pane.press({ key: 'gear-agent-t2' })
   expect(titles.at(-1)).toBe('Review the diff')
-  expect(await md()).toEqual(['Review the diff.', 'No **defects** found.'])
-  expect(await label('steps-agent-t2:h1')).toBe('Ran a command, used a tool ▸')
-  expect(await view.find({ text: /No result/ })).toBeFalsy()
+  expect(opened.at(-1)).toBe('workflow-monitor-agent-agent-t2')
+  const other = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent-agent-t2', props, viewport })
+  expect(await md(other)).toEqual(['Review the diff.', 'No **defects** found.'])
+  expect(await label('steps-agent-t2:h1', other)).toBe('Ran a command, used a tool ▸')
+  expect(await other.find({ text: /No result/ })).toBeFalsy()
+  expect(await label('steps-agent-t1:u3')).toBe('Read and edited f_01.js, used 2 tools ▸')
+  await pane.press({ key: 'gear-agent-t1' })
+  expect(opened.at(-1)).toBe('workflow-monitor-agent-agent-t1')
 
-  // Removing the card forgets what was unfolded in its transcripts.
-  await view.press({ key: 'steps-agent-t2:h1' })
-  expect(await label('steps-agent-t2:h1')).toBe('Ran a command, used a tool ▾')
+  // Removing the card closes its agents' panes and forgets what was unfolded in their transcripts;
+  // the other agent's pane stays.
+  await other.press({ key: 'steps-agent-t2:h1' })
+  expect(await label('steps-agent-t2:h1', other)).toBe('Ran a command, used a tool ▾')
   await pane.press({ key: 'gear-group-subagents' })
   await pane.press({ key: 'remove-subagents' })
-  expect(await view.find({ text: /Pick Inspect/ })).toBeTruthy()
+  expect(closed).toEqual(['workflow-monitor-agent-agent-t2'])
+  expect(await other.find({ text: /no longer in the monitor/ })).toBeTruthy()
+  expect(await view.find({ text: '✓ Completed' })).toBeTruthy()
+  await other.unmount()
   await view.unmount()
 
   // An agent whose meta isn't written yet as it starts goes by its label until a request of its
@@ -1510,7 +1529,7 @@ phase('Extract')`
   await $.turn.complete({ answer: '', durationMs: 1000, isAborted: false, turnId: 't-agent-t3', agentId: 'agent-t3', reason: 'error' })
   // (A finished row's ↗ opens its transcript.)
   await pane.press({ key: 'gear-agent-t3' })
-  const failed = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent', props, viewport })
+  const failed = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor-agent-agent-t3', props, viewport })
   expect(streamed).toContain(big)
   expect((await failed.findAll({ type: 'Markdown' })).map(x => x.props.text)).toEqual(['Sort them by pane.', 'I could not sort them.'])
   expect(await failed.find({ text: 'No result — task failed' })).toBeTruthy()

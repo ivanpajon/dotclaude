@@ -6,7 +6,11 @@ import { activity, fromLog, fromMessages, literalTildes, Reader, step, summary }
 import type { Transcript } from './transcript'
 
 const PANE = 'workflow-monitor'
+// Each agent's transcript opens in a pane of its own, `workflow-monitor-agent-<agent>` (see
+// inspectPane), so several can be read at once.
 const INSPECT = 'workflow-monitor-agent'
+const INSPECTS = /^workflow-monitor-agent(-|$)/
+const isInspect = (pane: string) => INSPECTS.test(pane)
 const TITLE = 'Workflows'
 // What /workflows help prints after an opening line: markdown, as a command's output row draws it
 // on every surface (spaces don't line up columns there, a table does).
@@ -23,7 +27,7 @@ const USAGE = [
     + ' and pick the model and effort of its next requests. On a card\'s header: the same for every agent in the workflow, the ones it starts later'
     + ' too (an agent\'s own setting wins); once the workflow is over, Archive or Remove it. It shows **◆** while a'
     + ' model or effort is set.',
-  '- **↗** opens a finished agent\'s transcript in another tab, as Claude Code\'s own View transcript does: the'
+  '- **↗** opens a finished agent\'s transcript in a tab of its own (one per agent, so several can be open at once), as Claude Code\'s own View transcript does: the'
     + ' prompt it was given, its replies, each run of tool calls summed up in a line that unfolds, and its answer.'
     + ' For a running agent, Inspect is in its settings panel and follows along live.',
   '- **✕** removes a finished workflow from the board. It isn\'t deleted: it moves under **Archived** at the bottom,'
@@ -58,7 +62,7 @@ const collapsed = atom({ plugin: 'workflow-monitor', key: 'collapsed' } as const
 const controls = atom({ plugin: 'workflow-monitor', key: 'controls' } as const, {} as Record<string, Control>)
 const held = atom({ plugin: 'workflow-monitor', key: 'held' } as const, {} as Record<string, boolean>)
 const logs = atom({ plugin: 'workflow-monitor', key: 'logs' } as const, {} as Record<string, LogEntry[]>)
-const inspecting = atom({ plugin: 'workflow-monitor', key: 'inspecting' } as const, null as string | null)
+const inspected = atom({ plugin: 'workflow-monitor', key: 'inspected' } as const, {} as Record<string, string>)
 const unfolded = atom({ plugin: 'workflow-monitor', key: 'unfolded' } as const, {} as Record<string, boolean>)
 const idle = atom({ plugin: 'workflow-monitor', key: 'idle' } as const, {} as Record<string, Idle>)
 const archived = atom({ plugin: 'workflow-monitor', key: 'archived' } as const, {} as Record<string, number>)
@@ -144,10 +148,10 @@ function look(r: AgentRow, c: Control | undefined): [string, string] {
 }
 
 // Column widths, shared by the header row and every agent row so they line up, each the widest its
-// values run to: "Sonnet 5.5", "Extra high", "999.9k", "59m 59s", "$12.34". The row button's label
+// values run to: "Sonnet 5.5", "Extra high", "999.9k", "9h 59m 59s", "$12.34". The row button's label
 // is three cells; a surface that draws native buttons adds its own chrome round it, which a
 // three-cell column cuts down to "…", so it gets `nativeGear`.
-const W = { glyph: 2, model: 10, effort: 10, tokens: 7, time: 7, cost: 7, gear: 3, nativeGear: 6 }
+const W = { glyph: 2, model: 10, effort: 10, tokens: 7, time: 10, cost: 7, gear: 3, nativeGear: 6 }
 // What a card takes from each agent row's width, both sides together: its border and padding on
 // the terminal; filled, its padding and that of the phase's table, which lines up with the
 // phase's header.
@@ -185,7 +189,7 @@ function duration(ms: number): string {
   if (s < 60) return `${s}s`
   const m = Math.floor(s / 60)
   if (m < 60) return `${m}m ${String(s % 60).padStart(2, '0')}s`
-  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m ${String(s % 60).padStart(2, '0')}s`
 }
 
 // A fold's chevron, the same in both panes and on every surface: these two sit level with the
@@ -766,6 +770,18 @@ async function closeSettings($: EngineInterface, ids: string[], groups: string[]
 const without = <V,>(all: Record<string, V>, keys: Set<string>): Record<string, V> =>
   Object.fromEntries(Object.entries(all).filter(([k]) => !keys.has(k)))
 
+// The pane an agent's transcript opens in, from the transcript panes open (pane to agent): the
+// one showing it already, else one named after it (a pane id takes 1-64 letters, digits, `_` and
+// `-`), numbered while another agent's id reads the same.
+function inspectPane(id: string, open: Record<string, string>): string {
+  const mine = Object.keys(open).find(p => open[p] === id)
+  if (mine) return mine
+  const base = `${INSPECT}-${id.replace(/[^A-Za-z0-9_-]/g, '_')}`.slice(0, 60)
+  let pane = base
+  for (let n = 2; open[pane] !== undefined; n++) pane = `${base}-${n}`
+  return pane
+}
+
 // Brings archived agents back to their card; written only when one of them is archived.
 async function restoreAgents($: EngineInterface, ids: string[]) {
   const back = new Set(ids)
@@ -801,7 +817,13 @@ async function removeAgents($: EngineInterface, ids: string[]) {
     wake(id)
   }
   const groups = [...new Set((await read($, agents)).filter(a => gone.has(a.id)).map(groupKey))]
-  if (gone.has((await read($, inspecting)) ?? '')) await update($, inspecting, () => null)
+  // Their transcript panes close, with nothing left to show.
+  const panes = await read($, inspected)
+  const shut = new Set(Object.keys(panes).filter(p => gone.has(panes[p]!)))
+  if (shut.size) {
+    await update($, inspected, all => without(all, shut))
+    for (const p of shut) await $.ui.close({ id: p }).catch(() => {})
+  }
   const list = await update($, agents, all => all.filter(a => !gone.has(a.id)))
   const drop = <V,>(all: Record<string, V>) => without(all, gone)
   await update($, logs, drop)
@@ -886,10 +908,10 @@ async function perform($: EngineInterface, key: string, value?: string) {
   const agent = (id: string) => list.find(a => a.id === id)
   const running = (group: string) => list.filter(a => groupKey(a) === group && a.status === 'running')
   const toggleEditor = (id: string) => update($, editing, cur => (cur === id ? null : id))
-  // Titled with the agent's description, as Claude Code's own transcript view is.
+  // In its own pane, titled with the agent's description as Claude Code's own transcript view is.
   const inspect = async (id: string) => {
-    await update($, inspecting, () => id)
-    await $.ui.open({ id: INSPECT, title: agent(id)?.label ?? id })
+    const panes = await update($, inspected, all => ({ ...all, [inspectPane(id, all)]: id }))
+    await $.ui.open({ id: inspectPane(id, panes), title: agent(id)?.label ?? id })
   }
   // A part of a transcript, unfolded or folded back: its prompt, or a run of its tool calls.
   const unfold = (k: string) => update($, unfolded, all => {
@@ -1059,14 +1081,14 @@ async function demoTick($: EngineInterface, t: number) {
 }
 
 export const register: Register = on => {
-  // Every press and pick in the two panes, run by the control's key (see byHook).
+  // Every press and pick in the panes, run by the control's key (see byHook).
   on('ui.press', { plugin: 'workflow-monitor' }, async ($, e, next) => {
-    if (e.requestId !== PANE && e.requestId !== INSPECT) return next(e)
+    if (e.requestId !== PANE && !isInspect(e.requestId)) return next(e)
     await perform($, e.element)
     return { element: e.element }
   })
   on('ui.select', { plugin: 'workflow-monitor' }, async ($, e, next) => {
-    if (e.requestId !== PANE && e.requestId !== INSPECT) return next(e)
+    if (e.requestId !== PANE && !isInspect(e.requestId)) return next(e)
     await perform($, e.element, e.value)
     return { element: e.element, value: e.value }
   })
@@ -1082,13 +1104,23 @@ export const register: Register = on => {
   // A region that failed on a surface: noted, so the redraw the engine makes next draws it anew
   // (see clientKey).
   on('ui.fault', async ($, e, next) => {
-    if (e.requestId === PANE || e.requestId === INSPECT) {
+    if (e.requestId === PANE || isInspect(e.requestId)) {
       const key = redrawnAs.get(e.element) ?? e.element
       const now = await $.clock.now()
       const f = faults.get(key)
       faults.set(key, { n: (f?.n ?? 0) + 1, at: [now, ...(f?.at ?? []).filter(t => now - t < FAULT_MS)] })
     }
     return next(e)
+  })
+  // A transcript pane closed (by the person, or for an agent removed): it shows its agent no more,
+  // and its kept controls go with it.
+  on('ui.close', async ($, e, next) => {
+    const closed = await next(e)
+    if (isInspect(e.id)) {
+      await update($, inspected, all => without(all, new Set([e.id])))
+      for (const site of kept.keys()) if (site.endsWith(`:${e.id}`)) kept.delete(site)
+    }
+    return closed
   })
 
   on('session.start', async ($, e, next) => {
@@ -1878,16 +1910,18 @@ export const register: Register = on => {
 
   // One agent's transcript, as Claude Code's own View transcript draws a subagent's: its model, the
   // prompt it was given, its replies with each run of tool calls summed up in a line that unfolds,
-  // its answer, and a line of totals. It follows along while the agent works.
-  on('ui.render', { component: 'Pane', requestId: INSPECT }, async ($, e) => {
+  // its answer, and a line of totals. It follows along while the agent works. One pane per agent.
+  on('ui.render', { component: 'Pane', requestId: INSPECTS }, async ($, e) => {
     const elements = $.ui.resolve(e)
     const { Box, Text, Button, Markdown } = elements
     const Client = 'Client' in elements ? elements.Client : undefined
-    const id = await read($, inspecting)
+    const id = (await read($, inspected))[e.requestId]
     const list = await read($, agents)
     const r = list.find(a => a.id === id)
+    // A pane left showing no agent: one removed or past the row cap, or the single pane of an earlier
+    // version. Inspect opens a pane of its own, never this one.
     if (!id || !r) {
-      return <Box paddingX={1}><Text dimColor>Pick Inspect on an agent in the Workflows pane.</Text></Box>
+      return <Box paddingX={1}><Text dimColor>This agent is no longer in the monitor. Close this tab; Inspect opens a new one.</Text></Box>
     }
     const gui = e.surface !== 'terminal'
     const faint = gui ? { color: HEADING } : { dimColor: true }
@@ -1914,7 +1948,7 @@ export const register: Register = on => {
     const notes = own ? log.filter(x => x.kind === 'note') : []
 
     // Kept as in the Workflows pane: the transcript redraws this pane at every few chunks it streams.
-    const keep = keeper(`${e.surface}:${INSPECT}`)
+    const keep = keeper(`${e.surface}:${e.requestId}`)
     const control = (key: string, label: string, quiet = false) =>
       keep(key, <Button key={key} label={label} plain={quiet || undefined} dimColor={quiet || undefined} onPress={byHook} />)
     // A line led by a small dot in a cell of its own, centred on the line. Desktop draws the dot (a
@@ -2018,7 +2052,7 @@ export const register: Register = on => {
     const hex = ctl === 'pause' ? PAUSED : ctl === 'stop' ? STOPPED : RUNNING
     const now = await $.clock.now()
     const worked = (r.pausedSince ?? r.endedAt ?? now) - r.startedAt - (r.pausedTotal ?? 0)
-    const footerKey = Client && isWorking(r, ctls) ? clientKey('footer-time', now) : undefined
+    const footerKey = Client && isWorking(r, ctls) ? clientKey(`footer-time-${id}`, now) : undefined
     const total = totalTokens(r.usage)
     const totals = `${t.calls === 1 ? '1 tool call' : `${t.calls} tool calls`} · ${total === 1 ? '1 token' : `${tokens(total)} tokens`} · `
     const footer = (
