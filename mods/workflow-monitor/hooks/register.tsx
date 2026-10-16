@@ -34,6 +34,7 @@ const USAGE = [
   '- **✕** removes a finished workflow from the board. It isn\'t deleted: it moves under **Archived** at the bottom,'
     + ' where Restore brings it back and Remove deletes it from the monitor for good. If the run starts again, it'
     + ' comes back by itself.',
+  '- **Finished** folds the finished cards away under its heading, and unfolds them, as **Archived** does.',
   '',
   '**Status**: ● working · ⏸ paused · ⏹ stopped · ✓ done · ✗ failed · ○ between phases · ⚠ script failed',
 ].join('\n')
@@ -69,6 +70,7 @@ const unfolded = atom({ plugin: 'workflow-monitor', key: 'unfolded' } as const, 
 const idle = atom({ plugin: 'workflow-monitor', key: 'idle' } as const, {} as Record<string, Idle>)
 const archived = atom({ plugin: 'workflow-monitor', key: 'archived' } as const, {} as Record<string, number>)
 const archiveOpen = atom({ plugin: 'workflow-monitor', key: 'archiveOpen' } as const, false)
+const finishedOpen = atom({ plugin: 'workflow-monitor', key: 'finishedOpen' } as const, true)
 const sessionDir = atom({ plugin: 'workflow-monitor', key: 'sessionDir' } as const, null as string | null)
 
 // USD per million tokens: [input, output, cache write (5 min), cache read].
@@ -988,6 +990,7 @@ async function perform($: EngineInterface, key: string, value?: string) {
   const closable = (g: string) => onCard(g).every(a => a.status !== 'running') ? onCard(g).map(a => a.id) : []
 
   if (key === 'archived-toggle') await update($, archiveOpen, v => !v)
+  else if (key === 'finished-toggle') await update($, finishedOpen, v => !v)
   else if (key === 'purge-archived') await removeAgents($, list.filter(a => arch[a.id]).map(a => a.id))
   else if (key.startsWith('close-')) await archiveAgents($, closable(rest('close-')))
   else if (key.startsWith('archive-')) await archiveAgents($, closable(rest('archive-')))
@@ -1475,6 +1478,7 @@ export const register: Register = on => {
     const holding = await read($, held)
     const arch = await read($, archived)
     const archOpen = await read($, archiveOpen)
+    const finOpen = await read($, finishedOpen)
     const idleBy = await read($, idle)
     const ends = await read($, outcomes)
     const lapsed = await read($, quiet)
@@ -1942,6 +1946,13 @@ export const register: Register = on => {
     const section = (title: string) => (
       <Box key={`section-${title}`} paddingX={1}><Text {...faint}>{title}</Text></Box>
     )
+    // "Finished" folds its cards away and back, as Archived does, its count beside it; still drawn
+    // dim, as a heading.
+    const finishedHead = (
+      <Box key="section-Finished" paddingX={1}>
+        {control(button('finished-toggle', `Finished (${cards.length - goingOn})`, { plain: true, dim: true, prefix: finOpen ? '▾ ' : '▸ ' }))}
+      </Box>
+    )
 
     // Archived cards, folded into one line until unfolded: each can come back or go for good.
     const archive = shelf.length > 0 && (
@@ -1970,8 +1981,8 @@ export const register: Register = on => {
       <Box flexDirection="column">
         {goingOn > 0 && section('Running')}
         {cards.slice(0, goingOn)}
-        {goingOn < cards.length && section('Finished')}
-        {cards.slice(goingOn)}
+        {goingOn < cards.length && finishedHead}
+        {finOpen && cards.slice(goingOn)}
         {ordered.length === 0 && (
           <Box paddingX={1} marginBottom={1}><Text dimColor>Nothing on the board: everything is archived.</Text></Box>
         )}

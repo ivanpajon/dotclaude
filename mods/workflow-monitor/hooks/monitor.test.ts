@@ -1156,9 +1156,25 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   expect(await isOpen('wf_h')).toBe(true)
   expect(await isOpen('wf_f')).toBe(false)
 
+  // The Finished heading folds them all away, and back, as Archived does; it says how many.
+  const onBoard = async (key: string) => !!(await pane.find({ key: `fold-${key}` }))
+  expect(await pane.find({ text: /^Finished \(\d+\)$/ })).toBeTruthy()
+  await pane.press({ key: 'finished-toggle' })
+  expect(await onBoard('wf_h')).toBe(false)
+  expect(await onBoard('wf_f')).toBe(false)
+  expect(await pane.find({ key: 'section-Finished' })).toBeTruthy()
+  await pane.press({ key: 'finished-toggle' })
+  expect(await onBoard('wf_h')).toBe(true)
+  expect(await onBoard('wf_f')).toBe(true)
+
   // A new agent wakes a quiet run up; working or between phases, it alone is unfolded.
   await spawn('toolu_wf_f', 'wf_f', 2) // agent-c13
   expect(await chipOf(pane, 'wf_f')).toBe('● 1 · ✓ 1')
+  // Folded, Finished hides the cards that are over, not the one going on again.
+  await pane.press({ key: 'finished-toggle' })
+  expect(await onBoard('wf_f')).toBe(true)
+  expect(await onBoard('wf_h')).toBe(false)
+  await pane.press({ key: 'finished-toggle' })
   await end('agent-c13', 'answer')
   expect(await chipOf(pane, 'wf_f')).toBe('○ · ✓ 2')
   expect(await isOpen('wf_f')).toBe(true)

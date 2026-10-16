@@ -128,6 +128,8 @@ declare module 'claude-code' {
       archived: Record<string, number>
       /** Whether the Archived section is unfolded. */
       archiveOpen: boolean
+      /** Whether the Finished section is unfolded (it is, until folded). */
+      finishedOpen: boolean
       /** Cards the person folded or unfolded, by group key, and phases on them by `<group>::<phase>`. */
       collapsed: Record<string, boolean>
       /** Pause or stop asked of a running agent, by agent id. */

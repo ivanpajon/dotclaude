@@ -30,7 +30,7 @@ The pane opens by itself when a subagent starts while none was running, and `/wo
 
 ### Cards
 
-Each workflow run is a card, and so are the plain subagents started with the Agent tool (one **Subagents** card). The pane follows the look of Claude Code's own Background tasks panel: cards still going are listed under **Running** and the rest under **Finished**. On the desktop the cards are filled panels with rounded corners and no visible border; in the terminal they keep a rounded border. A card shows:
+Each workflow run is a card, and so are the plain subagents started with the Agent tool (one **Subagents** card). The pane follows the look of Claude Code's own Background tasks panel: cards still going are listed under **Running** and the rest under **Finished**. Click **Finished** to fold the finished cards away, and again to bring them back, as with **Archived**. On the desktop the cards are filled panels with rounded corners and no visible border; in the terminal they keep a rounded border. A card shows:
 
 - **Header:** the workflow's name, its status chip, **⚙** for its settings, and **✕** once none of its agents is running.
 - **Summary:** how long it has been running, how many agents it started, their tokens, and their estimated cost. For a workflow the time is wall-clock time with no agent working left out; for the Subagents card it is the sum of each subagent's working time.
