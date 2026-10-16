@@ -323,6 +323,7 @@ test('a setting from the pane turns purple only the cells it changed, and leaves
     sent.push({ model: e.model, effort: e.effort })
     return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: USAGE }
   })
+  on('turn.complete', () => ({ text: 'ok' }))
   await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_h', input: { script: SCRIPT } })
   for (const index of [1, 2]) {
     await $.agent.spawn({
@@ -356,7 +357,7 @@ test('a setting from the pane turns purple only the cells it changed, and leaves
     // The card's gear stays a plain gear.
     expect(await pane.find({ text: /◆/ })).toBeFalsy()
     expect((await pane.find({ key: 'gear-group-wf_h' }))?.props.label).toBe('⚙')
-    // Once it applied, each agent's Effort is purple; its Model, left as it was, is not.
+    // Each agent's Effort is purple; its Model, left as it was, is not.
     expect(await hues(pane, 'Low')).toEqual(['merged', 'merged'])
     expect(await hues(pane, 'Opus 5.5')).toEqual([undefined, undefined])
     await pane.unmount()
@@ -400,6 +401,18 @@ test('a setting from the pane turns purple only the cells it changed, and leaves
   // And their next requests go as their own.
   await step('agent-h1', 2)
   expect(sent.at(-1)).toEqual({ model: 'claude-opus-5-5', effort: 'high' })
+
+  // A pick made after an agent's last request never reached it: once it ends, its row shows what that
+  // request went out with (Low, from its card, at its first request), not the pick.
+  const term4 = await mount('terminal')
+  await term4.press({ key: 'gear-agent-h2' })
+  await term4.select({ key: 'effort-agent-h2', value: 'max' })
+  await term4.press({ key: 'done-agent-h2' })
+  expect(await hues(term4, 'Max')).toEqual(['merged'])
+  await $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 't-agent-h2', agentId: 'agent-h2', reason: 'answer' })
+  expect(await term4.find({ text: 'Max' })).toBeFalsy()
+  expect(await hues(term4, 'Low')).toEqual(['merged'])
+  await term4.unmount()
 })
 
 test('on the desktop the pickers are the surface\'s own Selects and apply the pick', async ($, on) => {

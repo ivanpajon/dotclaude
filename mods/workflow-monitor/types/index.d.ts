@@ -31,6 +31,8 @@ export type AgentRow = {
   isModelOverridden: boolean
   /** True while an effort set from the pane is what it shows, the same way. */
   isEffortOverridden: boolean
+  /** What its latest request was sent with, as its row showed it then: what it shows once it ends. */
+  sent?: { model: string; effort?: string; isModelOverridden: boolean; isEffortOverridden: boolean }
   status: AgentStatus
   startedAt: number
   endedAt?: number

@@ -52,7 +52,7 @@ A card stays unfolded while its group is still going: agents working, paused or 
 | Cost | Estimated cost (see [Cost](#cost)) |
 | ⚙ / ↗ | **⚙** opens a running agent's settings; **↗** opens a finished agent's transcript |
 
-A model or effort set from the pane (on the agent or its card) shows in the agent's row at once, in purple: Model for a model, Effort for an effort, both for both. The agent uses it from its next request. Set back to **Inherit**, the agent's own model or effort comes back, in its plain color. A finished agent's row keeps what it showed when it ended.
+A model or effort set from the pane (on the agent or its card) shows in the agent's row at once, in purple: Model for a model, Effort for an effort, both for both. The agent uses it from its next request. Set back to **Inherit**, the agent's own model or effort comes back, in its plain color. A finished agent's row shows what its last request was sent with.
 
 The layout is responsive and never hides a column. As the pane narrows, the agent name gets shorter; once it would drop under 12 characters, each agent goes on two lines, with every column's value on the second.
 

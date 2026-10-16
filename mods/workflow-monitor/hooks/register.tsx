@@ -236,7 +236,16 @@ const groupKey = (a: AgentRow) => a.runId ?? SUBAGENTS
 function present(a: AgentRow, own: Override = {}, group: Override = {}): AgentRow {
   const model = own.model ?? group.model
   const effort = own.effort ?? group.effort
-  return { ...a, model: model ?? a.baseModel ?? a.model, effort: effort ?? a.baseEffort, isModelOverridden: !!model, isEffortOverridden: !!effort }
+  // A row kept from before the monitor noted its own values (no baseModel) keeps what it shows.
+  const mine = a.baseModel === undefined ? { model: a.model, effort: a.effort } : { model: a.baseModel, effort: a.baseEffort }
+  return { ...a, model: model ?? mine.model, effort: effort ?? mine.effort, isModelOverridden: !!model, isEffortOverridden: !!effort }
+}
+
+// What a finished agent shows: what its last request was sent with, not a pick made after it; with
+// none sent, its own.
+function settle(a: AgentRow): AgentRow {
+  if (a.sent) return { ...a, ...a.sent }
+  return a.baseModel === undefined ? a : { ...a, model: a.baseModel, effort: a.baseEffort, isModelOverridden: false, isEffortOverridden: false }
 }
 
 // Draws the running agents `hit` picks with the settings now picked (see present).
@@ -509,7 +518,7 @@ async function adoptRow($: EngineInterface, id: string, found: Found, model: str
     const own = (await read($, agentOverrides))[first.id]
     if (own) await update($, agentOverrides, all => ({ ...all, [id]: own }))
     await listAgent($, row, all => all.map(a => (a.id !== first.id ? a : {
-      ...a, retriedBy: id, ...(a.status === 'running' ? { status: 'stopped' as const, endedAt: t, quietMs } : {}),
+      ...a, retriedBy: id, ...(a.status === 'running' ? { ...settle(a), status: 'stopped' as const, endedAt: t, quietMs } : {}),
     })))
     if (carried) await setControl($, [id], carried)
   } else {
@@ -1082,7 +1091,7 @@ async function demoTick($: EngineInterface, t: number) {
 
   if (stopped.length) await closeSettings($, stopped)
   const list = await update($, agents, all => all.map(a => {
-    if (stopped.includes(a.id)) return { ...a, status: 'stopped' as const, endedAt: t }
+    if (stopped.includes(a.id)) return { ...settle(a), status: 'stopped' as const, endedAt: t }
     if (a.id !== stepper?.id) return a
     const out = 400 + (a.label.length * 37 + second) % 700
     return { ...a, steps: a.steps + 1, usage: { input: a.usage.input + out * 2, output: a.usage.output + out, cacheRead: a.usage.cacheRead + out * 12, cacheWrite: a.usage.cacheWrite } }
@@ -1314,10 +1323,17 @@ export const register: Register = on => {
     const effort = own.effort ?? group.effort
     const sent = { ...e, ...(model ? { model } : {}), ...(effort ? { effort: effort as typeof e.effort } : {}) }
 
-    // What the request names is the agent's own; the row shows the settings on top (see present).
-    // Written only when it changes: every write redraws the pane.
-    const shown = (a: AgentRow): AgentRow => present(
-      { ...a, baseModel: e.model || a.baseModel, baseEffort: e.effort === undefined ? a.baseEffort : String(e.effort) }, own, group)
+    // What the request names is the agent's own; the row shows the settings on top (see present), as
+    // they are now: a pick made while this request was readied stays shown. What went out is kept
+    // for when it ends (see settle). Written only when it changes: every write redraws the pane.
+    const ownNow = (await read($, agentOverrides))[id] ?? {}
+    const groupNow = (await read($, groupOverrides))[groupKey(row)] ?? {}
+    const shown = (a: AgentRow): AgentRow => {
+      const based = { ...a, baseModel: e.model || a.baseModel, baseEffort: e.effort === undefined ? a.baseEffort : String(e.effort) }
+      const went = present(based, own, group)
+      const sentWith = { model: went.model, effort: went.effort, isModelOverridden: went.isModelOverridden, isEffortOverridden: went.isEffortOverridden }
+      return { ...present(based, ownNow, groupNow), sent: sentWith }
+    }
     if (JSON.stringify(shown(row)) !== JSON.stringify(row)) {
       await update($, agents, list => list.map(a => (a.id === id ? shown(a) : a)))
     }
@@ -1405,7 +1421,7 @@ export const register: Register = on => {
           // Steps already counted each request; fall back to the turn's total if none reported.
           const counted = totalTokens(a.usage) > 0
           const usage = !counted && e.usage ? addUsage(ZERO, e.usage) : a.usage
-          return a.retriedBy ? { ...a, usage } : { ...a, status, endedAt, ...outside, usage }
+          return a.retriedBy ? { ...a, usage } : { ...settle(a), status, endedAt, ...outside, usage }
         }),
       )
       await syncIdle($, list, ctl)
