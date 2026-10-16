@@ -52,7 +52,7 @@ A card stays unfolded while its group is still going: agents working, paused or 
 | Cost | Estimated cost (see [Cost](#cost)) |
 | ⚙ / ↗ | **⚙** opens a running agent's settings; **↗** opens a finished agent's transcript |
 
-Once a model or effort set from the pane (on the agent or its card) has applied to one of the agent's requests, the cell it changed is drawn in purple: Model for a model, Effort for an effort, both for both.
+A model or effort set from the pane (on the agent or its card) shows in the agent's row at once, in purple: Model for a model, Effort for an effort, both for both. The agent uses it from its next request. Set back to **Inherit**, the agent's own model or effort comes back, in its plain color. A finished agent's row keeps what it showed when it ended.
 
 The layout is responsive and never hides a column. As the pane narrows, the agent name gets shorter; once it would drop under 12 characters, each agent goes on two lines, with every column's value on the second.
 
@@ -92,7 +92,7 @@ On a **running agent's row**, ⚙ opens a panel under it with:
 
 On a **card's header**, ⚙ opens the same for the whole group: **Pause all / Resume all**, **Stop all**, and a model and effort for every agent in it, including agents the workflow starts later. An agent's own setting wins over the card's. Once nothing in the card is running, **Archive** and **Remove** take the place of Pause all and Stop all. The model and effort pickers stay while the workflow may still start agents (between phases), and on the Subagents card, which new subagents can join at any time. Once a workflow has ended (done, failed or stopped), they are hidden: there is nothing left for them to apply to.
 
-The gear shows **▴** while its panel is open. Once a model or effort set there applies to an agent, the agent's Model or Effort turns purple (see [Agent rows](#agent-rows)).
+The gear shows **▴** while its panel is open. A model or effort set there shows at once in the agents' rows, in purple (see [Agent rows](#agent-rows)).
 
 ### ↗ Inspect
 

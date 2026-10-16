@@ -19,11 +19,17 @@ export type AgentRow = {
   phase?: string
   label: string
   type: string
+  /** The model it shows: one set from the pane while one is, else its own (see present). */
   model: string
+  /** The effort it shows, the same way. */
   effort?: string
-  /** True once a model set from the pane (on it or its card) applied to a request. */
+  /** The model its own requests name, before any setting from the pane. */
+  baseModel: string
+  /** The effort its own requests name (none for a model without effort), before any setting from the pane. */
+  baseEffort?: string
+  /** True while a model set from the pane (on it or its card) is what it shows: for a finished agent, at its end. */
   isModelOverridden: boolean
-  /** True once an effort set from the pane (on it or its card) applied to a request. */
+  /** True while an effort set from the pane is what it shows, the same way. */
   isEffortOverridden: boolean
   status: AgentStatus
   startedAt: number

@@ -25,8 +25,8 @@ const USAGE = [
   '**In the pane**',
   '- **⚙** opens the settings panel. On a running agent: pause it (at its next tool call) or resume it, stop it,'
     + ' and pick the model and effort of its next requests. On a card\'s header: the same for every agent in the workflow, the ones it starts later'
-    + ' too (an agent\'s own setting wins); once the workflow is over, Archive or Remove it. Once a model or effort'
-    + ' set there applies to an agent, the Model or Effort it changed turns purple in the agent\'s row.',
+    + ' too (an agent\'s own setting wins); once the workflow is over, Archive or Remove it. A model or effort set'
+    + ' there shows at once, in purple, in the agent\'s row, and applies from its next request; Inherit brings back its own.',
   '- **↗** opens a finished agent\'s transcript in a tab of its own (one per agent, so several can be open at once), as Claude Code\'s own View transcript does: the'
     + ' prompt it was given, its replies, each run of tool calls summed up in a line that unfolds, and its answer.'
     + ' For a running agent, Inspect is in its settings panel and follows along live.',
@@ -201,7 +201,7 @@ const chevron = (shut: boolean) => (shut ? '▸' : '▾')
 const effortLabel = (e?: string) => EFFORT_OPTIONS.find(o => o.value === e)?.label ?? e ?? '—'
 // The costliest efforts stand out: Max in red, Extra high in orange, a step under it.
 const XHIGH = '#F0883E'
-// A model or effort set from the pane: the cells it changed, once it applied.
+// A model or effort set from the pane: the cells it changes (see present).
 const SET = 'merged'
 const effortColor = (e?: string) => (e === 'max' ? 'error' : e === 'xhigh' ? XHIGH : undefined)
 
@@ -229,6 +229,22 @@ const sumCost = (rows: AgentRow[]): number | undefined => {
 }
 
 const groupKey = (a: AgentRow) => a.runId ?? SUBAGENTS
+
+// What a running agent's row shows: the model and effort set from the pane (its own, else its card's),
+// else those its own requests name. A pick shows at once, though it applies from the agent's next
+// request; set back to Inherit, the agent's own come back, and so does their plain color.
+function present(a: AgentRow, own: Override = {}, group: Override = {}): AgentRow {
+  const model = own.model ?? group.model
+  const effort = own.effort ?? group.effort
+  return { ...a, model: model ?? a.baseModel ?? a.model, effort: effort ?? a.baseEffort, isModelOverridden: !!model, isEffortOverridden: !!effort }
+}
+
+// Draws the running agents `hit` picks with the settings now picked (see present).
+async function repaint($: EngineInterface, hit: (a: AgentRow) => boolean) {
+  const own = await read($, agentOverrides)
+  const groups = await read($, groupOverrides)
+  await update($, agents, list => list.map(a => (a.status === 'running' && hit(a) ? present(a, own[a.id], groups[groupKey(a)]) : a)))
+}
 
 // Reads `name`, `description` and phase titles out of a script's `export const meta = {...}`.
 function parseMeta(script: string): WorkflowMeta | undefined {
@@ -463,7 +479,8 @@ async function adoptRow($: EngineInterface, id: string, found: Found, model: str
   const first = found.retryOf ? (await read($, agents)).find(a => a.id === found.retryOf && !a.retriedBy && a.status !== 'done') : undefined
   const row: AgentRow = {
     id, runId: found.runId, toolUseId: found.toolUseId || first?.toolUseId || '', index: first?.index ?? found.index,
-    label: found.label, type: found.type, model, effort: found.effort, isModelOverridden: false, isEffortOverridden: false,
+    label: found.label, type: found.type, model, effort: found.effort, baseModel: model, baseEffort: found.effort,
+    isModelOverridden: false, isEffortOverridden: false,
     status: 'running', startedAt: Math.min(found.startedAt || t, t), steps: 0, usage: ZERO,
     ...(found.retryOf ? { retryOf: found.retryOf } : {}),
     ...(found.phase ? { phase: found.phase } : {}),
@@ -965,10 +982,12 @@ async function perform($: EngineInterface, key: string, value?: string) {
     const field = key.startsWith('model-') ? 'model' : 'effort'
     const g = rest(`${field}-group-`)
     await update($, groupOverrides, all => ({ ...all, [g]: choose(all[g] ?? {}, field) }))
+    await repaint($, a => groupKey(a) === g)
   } else if (key.startsWith('model-') || key.startsWith('effort-')) {
     const field = key.startsWith('model-') ? 'model' : 'effort'
     const id = rest(`${field}-`)
     await update($, agentOverrides, all => ({ ...all, [id]: choose(all[id] ?? {}, field) }))
+    await repaint($, a => a.id === id)
   }
 }
 
@@ -999,7 +1018,8 @@ const DEMO_PROMPT = [
 function demoSeed(t: number): { rows: AgentRow[]; logs: Record<string, LogEntry[]> } {
   const row = (n: number, label: string, model: string, effort: string, status: AgentStatus, ago: number, took: number | undefined, out: number, runId?: string): AgentRow => ({
     id: `${DEMO}${n}`, runId, toolUseId: runId ? 'toolu_demo' : 'toolu_demo_sub', index: runId ? n : undefined,
-    label, type: runId ? 'workflow' : 'Explore', model, effort, isModelOverridden: false, isEffortOverridden: false, status,
+    label, type: runId ? 'workflow' : 'Explore', model, effort, baseModel: model, baseEffort: effort,
+    isModelOverridden: false, isEffortOverridden: false, status,
     startedAt: t - ago * 1000, endedAt: took === undefined ? undefined : t - (ago - took) * 1000,
     steps: Math.ceil(out / 900), usage: { input: out * 2, output: out, cacheRead: out * 12, cacheWrite: out },
   })
@@ -1247,7 +1267,7 @@ export const register: Register = on => {
     const started = await next(e)
     if ('deny' in started || !started.agentId) return started
 
-    const row: AgentRow = {
+    const fresh: AgentRow = {
       id: started.agentId,
       runId: e.workflow?.runId || undefined,
       toolUseId: e.tool_use_id,
@@ -1255,12 +1275,15 @@ export const register: Register = on => {
       label: e.description || e.subagentType,
       type: e.subagentType,
       model: started.model,
+      baseModel: started.model,
       isModelOverridden: false, isEffortOverridden: false,
       status: 'running',
       startedAt: await $.clock.now(),
       steps: 0,
       usage: ZERO,
     }
+    // A model or effort set on its card shows from the start.
+    const row = present(fresh, {}, (await read($, groupOverrides))[groupKey(fresh)])
     await listAgent($, row)
     await notePhase($, row).catch(() => {})
 
@@ -1291,9 +1314,10 @@ export const register: Register = on => {
     const effort = own.effort ?? group.effort
     const sent = { ...e, ...(model ? { model } : {}), ...(effort ? { effort: effort as typeof e.effort } : {}) }
 
+    // What the request names is the agent's own; the row shows the settings on top (see present).
     // Written only when it changes: every write redraws the pane.
-    const shown = (a: AgentRow): AgentRow =>
-      ({ ...a, model: sent.model || a.model, effort: sent.effort === undefined ? a.effort : String(sent.effort), isModelOverridden: a.isModelOverridden || !!model, isEffortOverridden: a.isEffortOverridden || !!effort })
+    const shown = (a: AgentRow): AgentRow => present(
+      { ...a, baseModel: e.model || a.baseModel, baseEffort: e.effort === undefined ? a.baseEffort : String(e.effort) }, own, group)
     if (JSON.stringify(shown(row)) !== JSON.stringify(row)) {
       await update($, agents, list => list.map(a => (a.id === id ? shown(a) : a)))
     }

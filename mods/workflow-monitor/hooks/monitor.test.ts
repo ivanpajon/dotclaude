@@ -318,7 +318,9 @@ test('a setting from the pane turns purple only the cells it changed, and leaves
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('tool.call', () => ({ result: 'launched' }))
   on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: `agent-h${++n}` }))
+  const sent: { model: string; effort?: unknown }[] = []
   on('turn.step', async function* (_$, e) {
+    sent.push({ model: e.model, effort: e.effort })
     return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: USAGE }
   })
   await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_h', input: { script: SCRIPT } })
@@ -360,11 +362,13 @@ test('a setting from the pane turns purple only the cells it changed, and leaves
     await pane.unmount()
   }
 
-  // One agent's own model: its Model turns purple, its gear stays as it was.
+  // One agent's own model: its Model turns purple at once, before its next request; its gear stays
+  // as it was.
   const term2 = await mount('terminal')
   await term2.press({ key: 'gear-agent-h1' })
   await term2.select({ key: 'model-agent-h1', value: 'claude-haiku-5-5' })
   await term2.press({ key: 'done-agent-h1' })
+  expect(await hues(term2, 'Haiku 5.5')).toEqual(['merged'])
   await step('agent-h1', 1)
   await term2.unmount()
   for (const surface of SURFACES) {
@@ -375,6 +379,27 @@ test('a setting from the pane turns purple only the cells it changed, and leaves
     expect(await hues(pane, 'Low')).toEqual(['merged', 'merged'])
     await pane.unmount()
   }
+
+  // Set back to Inherit, each agent shows its own model and effort again at once, in their plain colors.
+  const term3 = await mount('terminal')
+  await term3.press({ key: 'gear-agent-h1' })
+  await term3.select({ key: 'model-agent-h1', value: 'inherit' })
+  await term3.press({ key: 'done-agent-h1' })
+  await term3.press({ key: 'gear-group-wf_h' })
+  await term3.select({ key: 'effort-group-wf_h', value: 'inherit' })
+  await term3.press({ key: 'done-group-wf_h' })
+  await term3.unmount()
+  for (const surface of SURFACES) {
+    const pane = await mount(surface)
+    expect(await hues(pane, 'Opus 5.5')).toEqual([undefined, undefined])
+    expect(await hues(pane, 'High')).toEqual([undefined, undefined])
+    expect(await pane.find({ text: 'Haiku 5.5' })).toBeFalsy()
+    expect(await pane.find({ text: 'Low' })).toBeFalsy()
+    await pane.unmount()
+  }
+  // And their next requests go as their own.
+  await step('agent-h1', 2)
+  expect(sent.at(-1)).toEqual({ model: 'claude-opus-5-5', effort: 'high' })
 })
 
 test('on the desktop the pickers are the surface\'s own Selects and apply the pick', async ($, on) => {
