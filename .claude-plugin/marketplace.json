@@ -15,7 +15,7 @@
       "name": "workflow-monitor",
       "source": "./mods/workflow-monitor",
       "description": "Live pane of running workflows and subagents: model, effort, tokens, time and estimated cost. Pause, stop or retune any agent, and read its transcript live.",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "category": "productivity",
       "tags": ["mod", "workflows", "subagents", "cost", "pane", "transcripts"]
     }

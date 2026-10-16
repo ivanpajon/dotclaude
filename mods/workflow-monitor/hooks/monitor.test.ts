@@ -381,6 +381,8 @@ test('a control keeps its press handle while the panes redraw around it', async 
     const first = await pane.drawn()
     const handles = keys.map(k => handleOf(first, k))
     for (const h of handles) expect(typeof h).toBe('number')
+    // Before its first step the agent has cost nothing yet, shown with two decimals.
+    if (surface === 'terminal') expect(await pane.find({ text: /\$0\.00(?!\d)/ })).toBeTruthy()
 
     // A step lands: new tokens and cost redraw the pane, and every control keeps its handle.
     await step(surface === 'terminal' ? 0 : 1)

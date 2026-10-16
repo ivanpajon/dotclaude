@@ -181,7 +181,9 @@ function tokens(n: number): string {
 
 function money(n: number | undefined): string {
   if (n === undefined) return '—'
-  return n < 0.1 ? `$${n.toFixed(3)}` : `$${n.toFixed(2)}`
+  // Under $0.10 it keeps a third decimal, but a cost that would read $0.000 reads $0.00.
+  const shown = n.toFixed(n < 0.1 ? 3 : 2)
+  return shown === '0.000' ? '$0.00' : `$${shown}`
 }
 
 function duration(ms: number): string {
