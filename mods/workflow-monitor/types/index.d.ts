@@ -27,7 +27,7 @@ export type AgentRow = {
   baseModel: string
   /** The effort its own requests name (none for a model without effort), before any setting from the pane. */
   baseEffort?: string
-  /** True while a model set from the pane (on it or its card) is what it shows: for a finished agent, at its end. */
+  /** True while a model set from the pane (on it or its card) is what it shows: for a finished agent, at its end (drawn grey all the same). */
   isModelOverridden: boolean
   /** True while an effort set from the pane is what it shows, the same way. */
   isEffortOverridden: boolean
@@ -92,6 +92,13 @@ export type Override = {
   effort?: string
 }
 
+/** A model and effort picked in a settings panel and not yet set: Done sets them. */
+export type Draft = {
+  /** The panel they were picked in, as `editing` names it. */
+  editor: string
+  picks: Override
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'workflow-monitor': {
@@ -113,6 +120,8 @@ declare module 'claude-code' {
       groupOverrides: Record<string, Override>
       /** Which editor is open: `agent:<id>`, `group:<key>`, or none. */
       editing: string | null
+      /** Picks in the open editor that Done has not set yet; closing it any other way drops them. */
+      draft: Draft | null
       /** Time each group (by group key) spent with no agent working, left out of its counter. */
       idle: Record<string, Idle>
       /** Agents archived from the pane (closed cards), by agent id: when. Kept, and listed under Archived. */

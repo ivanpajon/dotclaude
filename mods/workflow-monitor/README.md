@@ -52,7 +52,7 @@ A card stays unfolded while its group is still going: agents working, paused or 
 | Cost | Estimated cost (see [Cost](#cost)) |
 | ⚙ / ↗ | **⚙** opens a running agent's settings; **↗** opens a finished agent's transcript |
 
-A model or effort set from the pane (on the agent or its card) shows in the agent's row at once, in purple: Model for a model, Effort for an effort, both for both. The agent uses it from its next request. Set back to **Inherit**, the agent's own model or effort comes back, in its plain color. A finished agent's row shows what its last request was sent with.
+A model or effort set from the pane (on the agent or its card) shows in the agent's row once **Done** sets it, in purple: Model for a model, Effort for an effort, both for both. The agent uses it from its next request. Set back to **Inherit**, the agent's own model or effort comes back, in its plain color. A finished agent's row shows what its last request was sent with, in grey like the rest of the row: no purple, and no effort color.
 
 The layout is responsive and never hides a column. As the pane narrows, the agent name gets shorter; once it would drop under 12 characters, each agent goes on two lines, with every column's value on the second.
 
@@ -87,12 +87,12 @@ On a **running agent's row**, ⚙ opens a panel under it with:
 
 - **Pause / Resume.** Pause holds the agent at its next tool call until you resume it, so it stops between steps without losing anything. A model request already under way finishes first, and an agent that answers without calling a tool finishes instead of waiting. It waits at a tool call because Claude Code ends a background or workflow agent that shows no progress for 10 minutes (and starts it again), and a tool call that is still running doesn't count as no progress. While it waits, the monitor runs a short sleeper process (`ping` on Windows, `sleep` elsewhere) every 30 seconds, since a hook can't otherwise wait more than 10 seconds. If no wait process will start, the pause is lifted instead of seeming to hold: a toast and a note in its transcript say so.
 - **Stop.** Ends the agent now: its next request is answered with a final reply in the model's place, and further tool calls are refused, so it winds down cleanly.
-- **Model** and **Effort** pickers. They apply from the agent's next request.
+- **Model** and **Effort** pickers, with **Done**. A pick waits in the panel until you press Done, which sets it; the agent uses it from its next request. Closing the panel any other way (its gear, another panel) drops the picks.
 - **↗ Inspect**, to open its transcript.
 
 On a **card's header**, ⚙ opens the same for the whole group: **Pause all / Resume all**, **Stop all**, and a model and effort for every agent in it, including agents the workflow starts later. An agent's own setting wins over the card's. Once nothing in the card is running, **Archive** and **Remove** take the place of Pause all and Stop all. The model and effort pickers stay while the workflow may still start agents (between phases), and on the Subagents card, which new subagents can join at any time. Once a workflow has ended (done, failed or stopped), they are hidden: there is nothing left for them to apply to.
 
-The gear shows **▴** while its panel is open. A model or effort set there shows at once in the agents' rows, in purple (see [Agent rows](#agent-rows)).
+The gear shows **▴** while its panel is open. A model or effort set there with **Done** shows at once in the agents' rows, in purple (see [Agent rows](#agent-rows)).
 
 ### ↗ Inspect
 

@@ -92,20 +92,28 @@ test('tracks a workflow agent, applies overrides, and pauses, stops and inspects
     await pane.unmount()
   }
 
-  // The gear opens agent 2's panel; Haiku 5.5 at low effort applies to its next request.
+  // The gear opens agent 2's panel; Haiku 5.5 at low effort, picked there, applies on Done, from its
+  // next request.
   const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'terminal', component: 'Pane', requestId: 'workflow-monitor', props, viewport })
   await pane.press({ key: 'gear-agent-2' })
   await $.ui.select({ plugin: 'workflow-monitor', key: 'model-agent-2', value: 'claude-haiku-5-5' })
   await $.ui.select({ plugin: 'workflow-monitor', key: 'effort-agent-2', value: 'low' })
+  await pane.press({ key: 'done-agent-2' })
   await step('agent-2', 0)
   expect(sent.at(-1)).toEqual({ model: 'claude-haiku-5-5', effort: 'low' })
   expect(sent[0]).toEqual({ model: 'claude-opus-5-5', effort: 'high' })
   expect(await pane.find({ text: 'Haiku 5.5' })).toBeTruthy()
   // Max is offered too, and applies like the rest.
+  await pane.press({ key: 'gear-agent-2' })
   await $.ui.select({ plugin: 'workflow-monitor', key: 'effort-agent-2', value: 'max' })
+  await pane.press({ key: 'done-agent-2' })
   await step('agent-2', 1)
   expect(sent.at(-1)).toEqual({ model: 'claude-haiku-5-5', effort: 'max' })
+  await pane.press({ key: 'gear-agent-2' })
   await $.ui.select({ plugin: 'workflow-monitor', key: 'effort-agent-2', value: 'low' })
+  await pane.press({ key: 'done-agent-2' })
+  // Open again for Pause and Stop.
+  await pane.press({ key: 'gear-agent-2' })
 
   // Inspect shows its model, replies and tool calls: here from the stream the monitor kept
   // (the agent's own transcript is a file, see the test on it), its thinking dim.
@@ -403,7 +411,8 @@ test('a setting from the pane turns purple only the cells it changed, and leaves
   expect(sent.at(-1)).toEqual({ model: 'claude-opus-5-5', effort: 'high' })
 
   // A pick made after an agent's last request never reached it: once it ends, its row shows what that
-  // request went out with (Low, from its card, at its first request), not the pick.
+  // request went out with (Low, from its card, at its first request), not the pick; and in grey, like
+  // the rest of a finished row, though a setting from the pane chose it.
   const term4 = await mount('terminal')
   await term4.press({ key: 'gear-agent-h2' })
   await term4.select({ key: 'effort-agent-h2', value: 'max' })
@@ -411,11 +420,98 @@ test('a setting from the pane turns purple only the cells it changed, and leaves
   expect(await hues(term4, 'Max')).toEqual(['merged'])
   await $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 't-agent-h2', agentId: 'agent-h2', reason: 'answer' })
   expect(await term4.find({ text: 'Max' })).toBeFalsy()
-  expect(await hues(term4, 'Low')).toEqual(['merged'])
   await term4.unmount()
+  for (const surface of SURFACES) {
+    const pane = await mount(surface)
+    const drawn = async (text: string) => (await pane.findAll({ text })).filter(x => x.type === 'Text').map(x => [x.props.color, !!x.props.dimColor])
+    expect(await drawn('Low')).toEqual([[undefined, true]])
+    // Opus 5.5 for both: agent-h1 still running, in its plain color; agent-h2 over, dim.
+    expect(await drawn('Opus 5.5')).toEqual([[undefined, false], [undefined, true]])
+    await pane.unmount()
+  }
 })
 
-test('on the desktop the pickers are the surface\'s own Selects and apply the pick', async ($, on) => {
+test('a pick in a settings panel waits for Done, and closing the panel any other way drops it', async ($, on) => {
+  let n = 0
+  on('clock.now', () => ({ value: 9_500_000 }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('tool.call', () => ({ result: 'launched' }))
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: `agent-p${++n}` }))
+  const sent: { model: string; effort?: unknown }[] = []
+  on('turn.step', async function* (_$, e) {
+    sent.push({ model: e.model, effort: e.effort })
+    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: USAGE }
+  })
+  await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_p', input: { script: SCRIPT } })
+  await $.agent.spawn({
+    tool_use_id: 'toolu_p', prompt: 'p', description: 'investigate:part-1', subagentType: 'general-purpose',
+    provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false,
+    workflow: { runId: 'wf_p', agentIndex: 1 },
+  })
+  const step = async (index: number) => {
+    const stream = $.turn.step({ turnId: 't-agent-p1', index, model: 'claude-opus-5-5', effort: 'high', messageCount: 1, agentId: 'agent-p1' })
+    for await (const _ of stream) { /* drain */ }
+    await stream.result
+  }
+  const props = { title: 'Workflows', isFocused: false, bodyColumns: 110 }
+  const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'terminal', component: 'Pane', requestId: 'workflow-monitor', props, viewport: { columns: 110, rows: 40 } })
+  // The colors of the Texts that read `text`.
+  const hues = async (text: string) => (await pane.findAll({ text })).filter(x => x.type === 'Text').map(x => x.props.color)
+  const value = async (key: string) => (await pane.find({ key }))?.props.value
+
+  // Picked, Haiku shows in the panel alone: the row keeps its own model, in its plain color, and so
+  // does the agent's next request.
+  await pane.press({ key: 'gear-agent-p1' })
+  await pane.select({ key: 'model-agent-p1', value: 'claude-haiku-5-5' })
+  await pane.select({ key: 'effort-agent-p1', value: 'low' })
+  expect(await value('model-agent-p1')).toBe('claude-haiku-5-5')
+  expect(await value('effort-agent-p1')).toBe('low')
+  expect(await hues('Haiku 5.5')).toEqual([])
+  expect(await hues('Opus 5.5')).toEqual([undefined])
+  await step(0)
+  expect(sent.at(-1)).toEqual({ model: 'claude-opus-5-5', effort: 'high' })
+
+  // Closed with its gear, the panel drops the picks: open again, it shows Inherit.
+  await pane.press({ key: 'gear-agent-p1' })
+  await pane.press({ key: 'gear-agent-p1' })
+  expect(await value('model-agent-p1')).toBe('inherit')
+  expect(await value('effort-agent-p1')).toBe('inherit')
+
+  // So does a card's panel left for another one.
+  await pane.press({ key: 'gear-group-wf_p' })
+  await pane.select({ key: 'effort-group-wf_p', value: 'low' })
+  await pane.press({ key: 'gear-agent-p1' })
+  await pane.press({ key: 'gear-group-wf_p' })
+  expect(await value('effort-group-wf_p')).toBe('inherit')
+  await step(1)
+  expect(sent.at(-1)).toEqual({ model: 'claude-opus-5-5', effort: 'high' })
+
+  // Done sets the picks: purple in the row at once, and on the agent's next request.
+  await pane.select({ key: 'effort-group-wf_p', value: 'low' })
+  await pane.press({ key: 'done-group-wf_p' })
+  expect(await pane.find({ key: 'effort-group-wf_p' })).toBeFalsy()
+  expect(await hues('Low')).toEqual(['merged'])
+  await step(2)
+  expect(sent.at(-1)).toEqual({ model: 'claude-opus-5-5', effort: 'low' })
+
+  // A pick on what is set builds on it: Haiku on top keeps the card's Low, and Inherit there, once
+  // Done sets it, brings back the agent's own.
+  await pane.press({ key: 'gear-agent-p1' })
+  await pane.select({ key: 'model-agent-p1', value: 'claude-haiku-5-5' })
+  await pane.press({ key: 'done-agent-p1' })
+  expect(await hues('Haiku 5.5')).toEqual(['merged'])
+  expect(await hues('Low')).toEqual(['merged'])
+  await pane.press({ key: 'gear-agent-p1' })
+  expect(await value('model-agent-p1')).toBe('claude-haiku-5-5')
+  await pane.select({ key: 'model-agent-p1', value: 'inherit' })
+  expect(await hues('Haiku 5.5')).toEqual(['merged'])
+  await pane.press({ key: 'done-agent-p1' })
+  expect(await hues('Haiku 5.5')).toEqual([])
+  expect(await hues('Opus 5.5')).toEqual([undefined])
+  await pane.unmount()
+})
+
+test('on the desktop the pickers are the surface\'s own Selects and apply the pick on Done', async ($, on) => {
   const sent: string[] = []
   on('clock.now', () => ({ value: 9_000_000 }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -433,6 +529,8 @@ test('on the desktop the pickers are the surface\'s own Selects and apply the pi
   await pane.press({ key: 'gear-agent-d' })
   expect((await pane.find({ key: 'model-agent-d' }))?.type).toBe('Select')
   await pane.select({ key: 'model-agent-d', value: 'claude-haiku-5-5' })
+  expect((await pane.find({ key: 'model-agent-d' }))?.props.value).toBe('claude-haiku-5-5')
+  await pane.press({ key: 'done-agent-d' })
 
   const stream = $.turn.step({ turnId: 't-d', index: 0, model: 'claude-opus-5-5', effort: 'high', messageCount: 1, agentId: 'agent-d' })
   for await (const _ of stream) { /* drain */ }
@@ -990,7 +1088,7 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   expect(await frame('wf_c')).toEqual({ fill: '#80808014', desktopBorder: 'round #00000000', border: undefined, dim: true })
   // Between phases it may start more agents: its settings, still open from Stop all, can set a model for them.
   await pane.select({ key: 'model-group-wf_c', value: 'claude-haiku-5-5' })
-  expect(await pane.find({ text: /Model and effort apply to agents it starts later/ })).toBeTruthy()
+  expect(await pane.find({ text: /Model and effort apply on Done, to agents it starts later/ })).toBeTruthy()
   await pane.press({ key: 'done-group-wf_c' })
 
   // Its run's notification says it was stopped: that's the lead, the agents it had beside it.

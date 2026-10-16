@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentRow, AgentStatus, AgentUsage, Control, ControlItem, Idle, LogEntry, Override, RunOutcome, WorkflowMeta } from '../types'
+import type { AgentRow, AgentStatus, AgentUsage, Control, ControlItem, Draft, Idle, LogEntry, Override, RunOutcome, WorkflowMeta } from '../types'
 import { activity, fromLog, fromMessages, literalTildes, Reader, step, summary } from './transcript'
 import type { Transcript } from './transcript'
 
@@ -25,8 +25,9 @@ const USAGE = [
   '**In the pane**',
   '- **⚙** opens the settings panel. On a running agent: pause it (at its next tool call) or resume it, stop it,'
     + ' and pick the model and effort of its next requests. On a card\'s header: the same for every agent in the workflow, the ones it starts later'
-    + ' too (an agent\'s own setting wins); once the workflow is over, Archive or Remove it. A model or effort set'
-    + ' there shows at once, in purple, in the agent\'s row, and applies from its next request; Inherit brings back its own.',
+    + ' too (an agent\'s own setting wins); once the workflow is over, Archive or Remove it. A model or effort picked'
+    + ' there applies on Done: it shows in purple in the agent\'s row while it runs, and applies from its next request; Inherit brings back'
+    + ' its own. Closed without Done, the panel drops its picks.',
   '- **↗** opens a finished agent\'s transcript in a tab of its own (one per agent, so several can be open at once), as Claude Code\'s own View transcript does: the'
     + ' prompt it was given, its replies, each run of tool calls summed up in a line that unfolds, and its answer.'
     + ' For a running agent, Inspect is in its settings panel and follows along live.',
@@ -58,6 +59,7 @@ const quiet = atom({ plugin: 'workflow-monitor', key: 'quiet' } as const, {} as 
 const agentOverrides = atom({ plugin: 'workflow-monitor', key: 'agentOverrides' } as const, {} as Record<string, Override>)
 const groupOverrides = atom({ plugin: 'workflow-monitor', key: 'groupOverrides' } as const, {} as Record<string, Override>)
 const editing = atom({ plugin: 'workflow-monitor', key: 'editing' } as const, null as string | null)
+const draft = atom({ plugin: 'workflow-monitor', key: 'draft' } as const, null as Draft | null)
 const collapsed = atom({ plugin: 'workflow-monitor', key: 'collapsed' } as const, {} as Record<string, boolean>)
 const controls = atom({ plugin: 'workflow-monitor', key: 'controls' } as const, {} as Record<string, Control>)
 const held = atom({ plugin: 'workflow-monitor', key: 'held' } as const, {} as Record<string, boolean>)
@@ -231,8 +233,8 @@ const sumCost = (rows: AgentRow[]): number | undefined => {
 const groupKey = (a: AgentRow) => a.runId ?? SUBAGENTS
 
 // What a running agent's row shows: the model and effort set from the pane (its own, else its card's),
-// else those its own requests name. A pick shows at once, though it applies from the agent's next
-// request; set back to Inherit, the agent's own come back, and so does their plain color.
+// else those its own requests name. A setting shows once Done sets it, though it applies from the
+// agent's next request; set back to Inherit, the agent's own come back, and so does their plain color.
 function present(a: AgentRow, own: Override = {}, group: Override = {}): AgentRow {
   const model = own.model ?? group.model
   const effort = own.effort ?? group.effort
@@ -787,11 +789,12 @@ async function syncIdle($: EngineInterface, list: AgentRow[], ctl: Record<string
   if (Object.keys(changes).length) await update($, idle, cur => ({ ...cur, ...changes }))
 }
 
-// A finished agent's settings panel closes: nothing in it applies any more. So does the panel of
-// a group whose card leaves the pane.
+// A finished agent's settings panel closes, dropping its picks: nothing in it applies any more. So
+// does the panel of a group whose card leaves the pane.
 async function closeSettings($: EngineInterface, ids: string[], groups: string[] = []) {
   const open = await read($, editing)
   if (open && (ids.some(id => open === `agent:${id}`) || groups.some(g => open === `group:${g}`))) {
+    await update($, draft, d => (d?.editor === open ? null : d))
     await update($, editing, cur => (cur === open ? null : cur))
   }
 }
@@ -937,7 +940,11 @@ async function perform($: EngineInterface, key: string, value?: string) {
   const ctl = await read($, controls)
   const agent = (id: string) => list.find(a => a.id === id)
   const running = (group: string) => list.filter(a => groupKey(a) === group && a.status === 'running')
-  const toggleEditor = (id: string) => update($, editing, cur => (cur === id ? null : id))
+  // A panel opened, closed or swapped for another: the picks left in the one open go (see draft).
+  const toggleEditor = async (id: string) => {
+    await update($, draft, () => null)
+    await update($, editing, cur => (cur === id ? null : id))
+  }
   // In its own pane, titled with the agent's description as Claude Code's own transcript view is.
   const inspect = async (id: string) => {
     const panes = await update($, inspected, all => ({ ...all, [inspectPane(id, all)]: id }))
@@ -949,6 +956,26 @@ async function perform($: EngineInterface, key: string, value?: string) {
     return was ? others : { ...others, [k]: true }
   })
   const choose = (o: Override, field: keyof Override): Override => ({ ...o, [field]: value === 'inherit' ? undefined : value })
+  // A pick waits in its panel's draft, over what is set now, until Done sets it all. One from a panel
+  // since closed (a dropdown left open on another surface) counts for nothing.
+  const pick = async (ed: string, set: Override = {}, field: keyof Override) => {
+    if ((await read($, editing)) !== ed) return
+    await update($, draft, d => ({ editor: ed, picks: choose(d?.editor === ed ? d.picks : set, field) }))
+  }
+  const apply = async (ed: string) => {
+    const d = await read($, draft)
+    const [kind, id] = [ed.slice(0, ed.indexOf(':')), ed.slice(ed.indexOf(':') + 1)]
+    if (d?.editor === ed && kind === 'group') {
+      await update($, groupOverrides, all => ({ ...all, [id]: d.picks }))
+      await repaint($, a => groupKey(a) === id)
+    } else if (d?.editor === ed) {
+      await update($, agentOverrides, all => ({ ...all, [id]: d.picks }))
+      await repaint($, a => a.id === id)
+    }
+    // Its own panel only: a Done kept from a panel since closed leaves the one open now be.
+    await update($, draft, cur => (cur?.editor === ed ? null : cur))
+    await update($, editing, cur => (cur === ed ? null : cur))
+  }
   const rest = (prefix: string) => key.slice(prefix.length)
   // Pause and Stop act on running agents only (a panel can outlive its agent), and a stop already
   // asked for stands: a later Pause or Resume leaves it be.
@@ -986,17 +1013,17 @@ async function perform($: EngineInterface, key: string, value?: string) {
   // A transcript's Show more (`more-<agent>`) and its runs of tool calls (`steps-<agent>:<first call>`).
   else if (key.startsWith('more-')) await unfold(`${rest('more-')}:prompt`)
   else if (key.startsWith('steps-')) await unfold(rest('steps-'))
-  else if (key.startsWith('done-')) await update($, editing, () => null)
+  // Done sets the panel's picks and closes it; a pick alone waits for it (see pick).
+  else if (key.startsWith('done-group-')) await apply(`group:${rest('done-group-')}`)
+  else if (key.startsWith('done-')) await apply(`agent:${rest('done-')}`)
   else if (key.startsWith('model-group-') || key.startsWith('effort-group-')) {
     const field = key.startsWith('model-') ? 'model' : 'effort'
     const g = rest(`${field}-group-`)
-    await update($, groupOverrides, all => ({ ...all, [g]: choose(all[g] ?? {}, field) }))
-    await repaint($, a => groupKey(a) === g)
+    await pick(`group:${g}`, (await read($, groupOverrides))[g], field)
   } else if (key.startsWith('model-') || key.startsWith('effort-')) {
     const field = key.startsWith('model-') ? 'model' : 'effort'
     const id = rest(`${field}-`)
-    await update($, agentOverrides, all => ({ ...all, [id]: choose(all[id] ?? {}, field) }))
-    await repaint($, a => a.id === id)
+    await pick(`agent:${id}`, (await read($, agentOverrides))[id], field)
   }
 }
 
@@ -1440,6 +1467,9 @@ export const register: Register = on => {
     const own = await read($, agentOverrides)
     const groups = await read($, groupOverrides)
     const open = await read($, editing)
+    // What a panel's pickers show: its picks not yet set, else what is set (see draft).
+    const drafted = await read($, draft)
+    const pickedIn = (ed: string, set: Override = {}) => (drafted?.editor === ed ? drafted.picks : set)
     const folded = await read($, collapsed)
     const ctl = await read($, controls)
     const holding = await read($, held)
@@ -1596,15 +1626,15 @@ export const register: Register = on => {
       const state = paused ? (holding[r.id] ? '' : ' · pausing…') : stopping ? ' · stopping…' : ''
       const label = <Text wrap="truncate-end" dimColor={over}>{r.label}<Text color={color}>{state}</Text></Text>
       const time = timer(`time-${r.id}`, worked(r), working(r) ? 1 : 0, over)
-      // Purple where a setting from the pane changed it; else the costliest efforts stand out (see
-      // effortColor) while they still spend.
-      const modelHue = r.isModelOverridden ? SET : undefined
-      const effortHue = r.isEffortOverridden ? SET : over ? undefined : effortColor(r.effort)
+      // While it runs: purple where a setting from the pane changed it, else the costliest efforts
+      // stand out (see effortColor). Once over, grey like the rest of its row.
+      const modelHue = !over && r.isModelOverridden ? SET : undefined
+      const effortHue = over ? undefined : r.isEffortOverridden ? SET : effortColor(r.effort)
       // Pause and Stop while it runs (a panel left open when it finishes keeps only Inspect).
       const settings = isOpen && editor(
         r.id,
-        own[r.id] ?? {},
-        'Pause holds its next tool call; Stop ends it now. Model and effort apply from its next request.',
+        pickedIn(`agent:${r.id}`, own[r.id]),
+        'Pause holds its next tool call; Stop ends it now. A model and effort picked here apply on Done, from its next request.',
         [
           ...(r.status === 'running' ? [
             button(`pause-${r.id}`, paused ? '▶ Resume' : '⏸ Pause'),
@@ -1765,11 +1795,11 @@ export const register: Register = on => {
         : [button(`archive-${key}`, '⊟ Archive'), button(`remove-${key}`, 'Remove')]
       const groupNote = running.length > 0
         ? isWorkflow
-          ? 'Applies to every agent in this workflow from its next request, including agents not started yet. A per-agent setting wins.'
-          : 'Applies to every subagent in this group from its next request. A per-agent setting wins.'
+          ? 'On Done, applies to every agent in this workflow from its next request, including agents not started yet. A per-agent setting wins.'
+          : 'On Done, applies to every subagent in this group from its next request. A per-agent setting wins.'
         : isWorkflow
-          ? `Archive (or ✕ on the card) moves it under Archived, where it can be restored; Remove deletes it from the monitor.${tunable ? ' Model and effort apply to agents it starts later.' : ''}`
-          : 'Archive (or ✕ on the card) moves them under Archived, where they can be restored; Remove deletes them from the monitor. Model and effort apply to subagents started later.'
+          ? `Archive (or ✕ on the card) moves it under Archived, where it can be restored; Remove deletes it from the monitor.${tunable ? ' Model and effort apply on Done, to agents it starts later.' : ''}`
+          : 'Archive (or ✕ on the card) moves them under Archived, where they can be restored; Remove deletes them from the monitor. Model and effort apply on Done, to subagents started later.'
 
       // Phases as each agent ran in (see phaseOf); agents with none go under "Agents". While the run goes on,
       // the phases its script names that started no agent yet are listed too, greyed and folded.
@@ -1900,7 +1930,7 @@ export const register: Register = on => {
             <Text><Text bold>{money(sumCost(rows))}</Text><Text dimColor> est.</Text></Text>
           </Box>
           {!isFolded && meta?.description && <Text dimColor wrap="wrap">{meta.description}</Text>}
-          {groupOpen && editor(`group-${key}`, groups[key] ?? {}, groupNote, groupActions, tunable)}
+          {groupOpen && editor(`group-${key}`, pickedIn(`group:${key}`, groups[key]), groupNote, groupActions, tunable)}
           {!isFolded && hasPhases && <Box marginTop={1}><Text bold>Phases</Text></Box>}
           {!isFolded && phaseOrder.map(phaseBlock)}
         </Box>
