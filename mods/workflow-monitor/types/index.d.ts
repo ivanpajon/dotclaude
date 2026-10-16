@@ -21,8 +21,10 @@ export type AgentRow = {
   type: string
   model: string
   effort?: string
-  /** True once a model or effort override from the pane applied to a request. */
-  isOverridden: boolean
+  /** True once a model set from the pane (on it or its card) applied to a request. */
+  isModelOverridden: boolean
+  /** True once an effort set from the pane (on it or its card) applied to a request. */
+  isEffortOverridden: boolean
   status: AgentStatus
   startedAt: number
   endedAt?: number

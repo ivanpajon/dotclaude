@@ -25,8 +25,8 @@ const USAGE = [
   '**In the pane**',
   '- **⚙** opens the settings panel. On a running agent: pause it (at its next tool call) or resume it, stop it,'
     + ' and pick the model and effort of its next requests. On a card\'s header: the same for every agent in the workflow, the ones it starts later'
-    + ' too (an agent\'s own setting wins); once the workflow is over, Archive or Remove it. It shows **◆** while a'
-    + ' model or effort is set.',
+    + ' too (an agent\'s own setting wins); once the workflow is over, Archive or Remove it. Once a model or effort'
+    + ' set there applies to an agent, the Model or Effort it changed turns purple in the agent\'s row.',
   '- **↗** opens a finished agent\'s transcript in a tab of its own (one per agent, so several can be open at once), as Claude Code\'s own View transcript does: the'
     + ' prompt it was given, its replies, each run of tool calls summed up in a line that unfolds, and its answer.'
     + ' For a running agent, Inspect is in its settings panel and follows along live.',
@@ -201,6 +201,8 @@ const chevron = (shut: boolean) => (shut ? '▸' : '▾')
 const effortLabel = (e?: string) => EFFORT_OPTIONS.find(o => o.value === e)?.label ?? e ?? '—'
 // The costliest efforts stand out: Max in red, Extra high in orange, a step under it.
 const XHIGH = '#F0883E'
+// A model or effort set from the pane: the cells it changed, once it applied.
+const SET = 'merged'
 const effortColor = (e?: string) => (e === 'max' ? 'error' : e === 'xhigh' ? XHIGH : undefined)
 
 type ApiUsage = { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }
@@ -461,7 +463,7 @@ async function adoptRow($: EngineInterface, id: string, found: Found, model: str
   const first = found.retryOf ? (await read($, agents)).find(a => a.id === found.retryOf && !a.retriedBy && a.status !== 'done') : undefined
   const row: AgentRow = {
     id, runId: found.runId, toolUseId: found.toolUseId || first?.toolUseId || '', index: first?.index ?? found.index,
-    label: found.label, type: found.type, model, effort: found.effort, isOverridden: false,
+    label: found.label, type: found.type, model, effort: found.effort, isModelOverridden: false, isEffortOverridden: false,
     status: 'running', startedAt: Math.min(found.startedAt || t, t), steps: 0, usage: ZERO,
     ...(found.retryOf ? { retryOf: found.retryOf } : {}),
     ...(found.phase ? { phase: found.phase } : {}),
@@ -997,7 +999,7 @@ const DEMO_PROMPT = [
 function demoSeed(t: number): { rows: AgentRow[]; logs: Record<string, LogEntry[]> } {
   const row = (n: number, label: string, model: string, effort: string, status: AgentStatus, ago: number, took: number | undefined, out: number, runId?: string): AgentRow => ({
     id: `${DEMO}${n}`, runId, toolUseId: runId ? 'toolu_demo' : 'toolu_demo_sub', index: runId ? n : undefined,
-    label, type: runId ? 'workflow' : 'Explore', model, effort, isOverridden: false, status,
+    label, type: runId ? 'workflow' : 'Explore', model, effort, isModelOverridden: false, isEffortOverridden: false, status,
     startedAt: t - ago * 1000, endedAt: took === undefined ? undefined : t - (ago - took) * 1000,
     steps: Math.ceil(out / 900), usage: { input: out * 2, output: out, cacheRead: out * 12, cacheWrite: out },
   })
@@ -1253,7 +1255,7 @@ export const register: Register = on => {
       label: e.description || e.subagentType,
       type: e.subagentType,
       model: started.model,
-      isOverridden: false,
+      isModelOverridden: false, isEffortOverridden: false,
       status: 'running',
       startedAt: await $.clock.now(),
       steps: 0,
@@ -1291,7 +1293,7 @@ export const register: Register = on => {
 
     // Written only when it changes: every write redraws the pane.
     const shown = (a: AgentRow): AgentRow =>
-      ({ ...a, model: sent.model || a.model, effort: sent.effort === undefined ? a.effort : String(sent.effort), isOverridden: a.isOverridden || !!(model || effort) })
+      ({ ...a, model: sent.model || a.model, effort: sent.effort === undefined ? a.effort : String(sent.effort), isModelOverridden: a.isModelOverridden || !!model, isEffortOverridden: a.isEffortOverridden || !!effort })
     if (JSON.stringify(shown(row)) !== JSON.stringify(row)) {
       await update($, agents, list => list.map(a => (a.id === id ? shown(a) : a)))
     }
@@ -1480,7 +1482,7 @@ export const register: Register = on => {
     const glyphCell = (child: unknown) => (
       <Box width={W.glyph} flexShrink={0} justifyContent="center" alignItems="center">{child}</Box>
     )
-    // The row button, centred both ways in its column (⚙ ◆ ▴ ↗ line up; a native button sits mid-row).
+    // The row button, centred both ways in its column (⚙ ▴ ↗ line up; a native button sits mid-row).
     const gearCell = (child: unknown) => (
       <Box width={gearW} flexShrink={0} justifyContent="center" alignItems="center">{child}</Box>
     )
@@ -1543,12 +1545,10 @@ export const register: Register = on => {
       const stopping = r.status === 'running' && ctl[r.id] === 'stop'
       const [glyph, color] = look(r, ctl[r.id])
       const isOpen = open === `agent:${r.id}`
-      const hasOverride = !!(own[r.id]?.model || own[r.id]?.effort)
-      const accent = r.isOverridden ? 'merged' : undefined
       // Running: the settings gear. Finished: Inspect's ↗, its one action left, straight to its
       // transcript (perform() tells them apart). Padded with no-break spaces, which no surface trims: a
       // wider target than the glyph alone, in a column wide enough for it (see gearCell).
-      const icon = r.status !== 'running' ? '↗' : isOpen ? '▴' : hasOverride ? '◆' : '⚙'
+      const icon = r.status !== 'running' ? '↗' : isOpen ? '▴' : '⚙'
       // A finished agent is drawn grey throughout, its icon aside, as Claude Code's own panel does.
       const over = r.status !== 'running'
       const gear = control(button(`gear-${r.id}`, ` ${icon} `, { plain: true, dim: over }))
@@ -1556,8 +1556,10 @@ export const register: Register = on => {
       const state = paused ? (holding[r.id] ? '' : ' · pausing…') : stopping ? ' · stopping…' : ''
       const label = <Text wrap="truncate-end" dimColor={over}>{r.label}<Text color={color}>{state}</Text></Text>
       const time = timer(`time-${r.id}`, worked(r), working(r) ? 1 : 0, over)
-      // The costliest efforts stand out (see effortColor) while they still spend.
-      const effortHue = accent ?? (over ? undefined : effortColor(r.effort))
+      // Purple where a setting from the pane changed it; else the costliest efforts stand out (see
+      // effortColor) while they still spend.
+      const modelHue = r.isModelOverridden ? SET : undefined
+      const effortHue = r.isEffortOverridden ? SET : over ? undefined : effortColor(r.effort)
       // Pause and Stop while it runs (a panel left open when it finishes keeps only Inspect).
       const settings = isOpen && editor(
         r.id,
@@ -1583,7 +1585,7 @@ export const register: Register = on => {
               {gearCell(gear)}
             </Box>
             <Box flexDirection="row" flexWrap="wrap" columnGap={2} marginLeft={W.glyph + 1}>
-              <Text color={accent} dimColor={over}>{shortModel(r.model)}</Text>
+              <Text color={modelHue} dimColor={over}>{shortModel(r.model)}</Text>
               <Text color={effortHue} dimColor={over || !effortHue}>{effortLabel(r.effort)}</Text>
               <Text dimColor={over}>{tokens(totalTokens(r.usage))}<Text dimColor> tok</Text></Text>
               {time}
@@ -1600,7 +1602,7 @@ export const register: Register = on => {
           <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
             {label}
           </Box>
-          {cell(W.model, <Text wrap="truncate-end" color={accent} dimColor={over}>{shortModel(r.model)}</Text>)}
+          {cell(W.model, <Text wrap="truncate-end" color={modelHue} dimColor={over}>{shortModel(r.model)}</Text>)}
           {cell(W.effort, <Text color={effortHue} dimColor={over}>{effortLabel(r.effort)}</Text>)}
           {cell(W.tokens, <Text dimColor={over}>{tokens(totalTokens(r.usage))}</Text>, true)}
           {cell(W.time, time, true)}
@@ -1715,8 +1717,6 @@ export const register: Register = on => {
       // effort is left nothing to apply to; one between phases may still, and plain subagents can
       // start any time.
       const tunable = !isWorkflow || isActive(state)
-      const go = groups[key] ?? {}
-      const hasGroupOverride = tunable && !!(go.model || go.effort)
       const running = rows.filter(r => r.status === 'running')
       const anyPaused = running.some(r => ctl[r.id] === 'pause')
       // Running: pause or stop them all. Finished: archive the card (restorable) or remove it.
@@ -1844,7 +1844,7 @@ export const register: Register = on => {
             </Box>
             <Box flexDirection="row" gap={1} flexShrink={0}>
               {chip(key, state, tallies.get(key)!)}
-              {control(button(`gear-group-${key}`, groupOpen ? '▴' : hasGroupOverride ? '◆' : '⚙', { plain: true }))}
+              {control(button(`gear-group-${key}`, groupOpen ? '▴' : '⚙', { plain: true }))}
               {live === 0 && control(button(`close-${key}`, '✕', { plain: true }))}
             </Box>
           </Box>
@@ -1860,7 +1860,7 @@ export const register: Register = on => {
             <Text><Text bold>{money(sumCost(rows))}</Text><Text dimColor> est.</Text></Text>
           </Box>
           {!isFolded && meta?.description && <Text dimColor wrap="wrap">{meta.description}</Text>}
-          {groupOpen && editor(`group-${key}`, go, groupNote, groupActions, tunable)}
+          {groupOpen && editor(`group-${key}`, groups[key] ?? {}, groupNote, groupActions, tunable)}
           {!isFolded && hasPhases && <Box marginTop={1}><Text bold>Phases</Text></Box>}
           {!isFolded && phaseOrder.map(phaseBlock)}
         </Box>

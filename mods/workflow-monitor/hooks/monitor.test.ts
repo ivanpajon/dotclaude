@@ -312,6 +312,71 @@ test('paused and stopped agents stop counting, and a workflow with none working 
   await pane.unmount()
 })
 
+test('a setting from the pane turns purple only the cells it changed, and leaves the gear be', async ($, on) => {
+  let n = 0
+  on('clock.now', () => ({ value: 9_500_000 }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('tool.call', () => ({ result: 'launched' }))
+  on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: `agent-h${++n}` }))
+  on('turn.step', async function* (_$, e) {
+    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: USAGE }
+  })
+  await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_h', input: { script: SCRIPT } })
+  for (const index of [1, 2]) {
+    await $.agent.spawn({
+      tool_use_id: 'toolu_h', prompt: 'p', description: `investigate:part-${index}`, subagentType: 'general-purpose',
+      provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false,
+      workflow: { runId: 'wf_h', agentIndex: index },
+    })
+  }
+  const step = async (agentId: string, index: number) => {
+    const stream = $.turn.step({ turnId: `t-${agentId}`, index, model: 'claude-opus-5-5', effort: 'high', messageCount: 1, agentId })
+    for await (const _ of stream) { /* drain */ }
+    await stream.result
+  }
+  const props = { title: 'Workflows', isFocused: false, bodyColumns: 110 }
+  const mount = (surface: typeof SURFACES[number]) =>
+    $.ui.mount({ plugin: 'workflow-monitor', surface, component: 'Pane', requestId: 'workflow-monitor', props, viewport: { columns: 110, rows: 40 } })
+  // The colors of the Texts that read `text`.
+  const hues = async (pane: Awaited<ReturnType<typeof mount>>, text: string) =>
+    (await pane.findAll({ text })).filter(x => x.type === 'Text').map(x => x.props.color)
+
+  // The whole workflow's effort, set from its card.
+  const term = await mount('terminal')
+  await term.press({ key: 'gear-group-wf_h' })
+  await term.select({ key: 'effort-group-wf_h', value: 'low' })
+  await term.press({ key: 'done-group-wf_h' })
+  await step('agent-h1', 0)
+  await step('agent-h2', 0)
+  await term.unmount()
+  for (const surface of SURFACES) {
+    const pane = await mount(surface)
+    // The card's gear stays a plain gear.
+    expect(await pane.find({ text: /◆/ })).toBeFalsy()
+    expect((await pane.find({ key: 'gear-group-wf_h' }))?.props.label).toBe('⚙')
+    // Once it applied, each agent's Effort is purple; its Model, left as it was, is not.
+    expect(await hues(pane, 'Low')).toEqual(['merged', 'merged'])
+    expect(await hues(pane, 'Opus 5.5')).toEqual([undefined, undefined])
+    await pane.unmount()
+  }
+
+  // One agent's own model: its Model turns purple, its gear stays as it was.
+  const term2 = await mount('terminal')
+  await term2.press({ key: 'gear-agent-h1' })
+  await term2.select({ key: 'model-agent-h1', value: 'claude-haiku-5-5' })
+  await term2.press({ key: 'done-agent-h1' })
+  await step('agent-h1', 1)
+  await term2.unmount()
+  for (const surface of SURFACES) {
+    const pane = await mount(surface)
+    expect((await pane.find({ key: 'gear-agent-h1' }))?.props.label).toBe('\u00a0⚙\u00a0')
+    expect(await hues(pane, 'Haiku 5.5')).toEqual(['merged'])
+    expect(await hues(pane, 'Opus 5.5')).toEqual([undefined])
+    expect(await hues(pane, 'Low')).toEqual(['merged', 'merged'])
+    await pane.unmount()
+  }
+})
+
 test('on the desktop the pickers are the surface\'s own Selects and apply the pick', async ($, on) => {
   const sent: string[] = []
   on('clock.now', () => ({ value: 9_000_000 }))
@@ -593,7 +658,6 @@ test('a group can sit on the board and under Archived at once, and starts afresh
   await pane.press({ key: 'gear-group-wf_r' })
   await pane.select({ key: 'model-group-wf_r', value: 'claude-haiku-5-5' })
   await pane.press({ key: 'done-group-wf_r' })
-  expect(await pane.find({ text: '◆' })).toBeTruthy()
   await finish('agent-s3')
   await pane.press({ key: 'gear-group-wf_r' })
   await pane.press({ key: 'remove-wf_r' })
@@ -601,7 +665,9 @@ test('a group can sit on the board and under Archived at once, and starts afresh
   await spawn(2, 'wf_r') // agent-s4
   expect(await has('fold-wf_r')).toBe(true)
   expect(await has('cols-wf_r-Investigate')).toBe(true)
-  expect(await pane.find({ text: '◆' })).toBeFalsy()
+  await pane.press({ key: 'gear-group-wf_r' })
+  expect((await pane.find({ key: 'model-group-wf_r' }))?.props.value).toBe('inherit')
+  await pane.press({ key: 'gear-group-wf_r' })
   await pane.unmount()
 })
 
@@ -888,14 +954,12 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   await pane.select({ key: 'model-group-wf_c', value: 'claude-haiku-5-5' })
   expect(await pane.find({ text: /Model and effort apply to agents it starts later/ })).toBeTruthy()
   await pane.press({ key: 'done-group-wf_c' })
-  expect(await pane.find({ text: '◆' })).toBeTruthy()
 
   // Its run's notification says it was stopped: that's the lead, the agents it had beside it.
   await notify('toolu_c', 'killed')
   expect(await chipOf(pane, 'wf_c')).toBe('⏹ 3 · ✗ 1 · ✓ 1')
   expect(await atWidths('wf_c')).toEqual(['⏹3 ✗1 ✓1', '⏹3 ✗1 ✓1'])
-  // Over: no pickers, and the model it kept no longer shows ◆.
-  expect(await pane.find({ text: '◆' })).toBeFalsy()
+  // Over: no pickers.
   await pane.press({ key: 'gear-group-wf_c' })
   expect(await pane.find({ key: 'model-group-wf_c' })).toBeFalsy()
   expect(await pane.find({ key: 'archive-wf_c' })).toBeTruthy()
@@ -910,7 +974,9 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_c2', input: {} })
   expect(await chipOf(pane, 'wf_c')).toBe('○ · ✗ 1 · ⏹ 3 · ✓ 1')
   // Going again, the model it kept applies again, and shows, and so does the phase still to come.
-  expect(await pane.find({ text: '◆' })).toBeTruthy()
+  await pane.press({ key: 'gear-group-wf_c' })
+  expect((await pane.find({ key: 'model-group-wf_c' }))?.props.value).toBe('claude-haiku-5-5')
+  await pane.press({ key: 'gear-group-wf_c' })
   expect(await pane.find({ key: 'phase-wf_c-Critique' })).toBeTruthy()
   await spawn('', 'wf_c', 6) // agent-c6
   expect(await chipOf(pane, 'wf_c')).toBe('● 1 · ✗ 1 · ⏹ 3 · ✓ 1')

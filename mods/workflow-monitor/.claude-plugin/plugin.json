@@ -1,6 +1,6 @@
 {
   "name": "workflow-monitor",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Live pane of running workflows and subagents: model, effort, tokens, time and estimated cost. Pause, stop or retune any agent, and read its transcript live.",
   "author": { "name": "Ivan Pajon", "url": "https://github.com/ivanpajon" },
   "homepage": "https://github.com/ivanpajon/dotclaude/tree/main/mods/workflow-monitor",
