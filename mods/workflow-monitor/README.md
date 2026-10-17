@@ -11,20 +11,20 @@ It works in the terminal and in the desktop app.
 /plugin install workflow-monitor@dotclaude
 ```
 
-The pane opens by itself when a subagent starts while none was running, and `/workflows` opens it any time. To try it now with sample data (`/workflows clear` removes it afterwards):
+The pane opens by itself when a subagent starts while none was running, and `/workflow-monitor` opens it any time. To try it now with sample data (`/workflow-monitor clear` removes it afterwards):
 
 ```
-/workflows demo
+/workflow-monitor demo
 ```
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `/workflows` | Open the pane. It also opens by itself when a subagent starts. |
-| `/workflows demo` | Load a sample workflow to try the pane out: running, paused and stopped agents, phases, transcripts. |
-| `/workflows clear` | Remove finished, archived and demo agents. Running ones stay. |
-| `/workflows help` | Show the commands, the pane's controls and the status icons. |
+| `/workflow-monitor` | Open the pane. It also opens by itself when a subagent starts. |
+| `/workflow-monitor demo` | Load a sample workflow to try the pane out: running, paused and stopped agents, phases, transcripts. |
+| `/workflow-monitor clear` | Remove finished, archived and demo agents. Running ones stay. |
+| `/workflow-monitor help` | Show the commands, the pane's controls and the status icons. |
 
 ## The pane
 

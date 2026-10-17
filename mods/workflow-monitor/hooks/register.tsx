@@ -12,15 +12,15 @@ const INSPECT = 'workflow-monitor-agent'
 const INSPECTS = /^workflow-monitor-agent(-|$)/
 const isInspect = (pane: string) => INSPECTS.test(pane)
 const TITLE = 'Workflows'
-// What /workflows help prints after an opening line: markdown, as a command's output row draws it
+// What /workflow-monitor help prints after an opening line: markdown, as a command's output row draws it
 // on every surface (spaces don't line up columns there, a table does).
 const USAGE = [
   '| Command | What it does |',
   '|---|---|',
-  '| `/workflows` | Open the pane. It also opens by itself when a subagent starts. |',
-  '| `/workflows demo` | Load a sample workflow to try the pane out. |',
-  '| `/workflows clear` | Remove finished, archived and demo agents. Running ones stay. |',
-  '| `/workflows help` | Show this help. |',
+  '| `/workflow-monitor` | Open the pane. It also opens by itself when a subagent starts. |',
+  '| `/workflow-monitor demo` | Load a sample workflow to try the pane out. |',
+  '| `/workflow-monitor clear` | Remove finished, archived and demo agents. Running ones stay. |',
+  '| `/workflow-monitor help` | Show this help. |',
   '',
   '**In the pane**',
   '- **⚙** opens the settings panel. On a running agent: pause it (at its next tool call) or resume it, stop it,'
@@ -1030,7 +1030,7 @@ async function perform($: EngineInterface, key: string, value?: string) {
   }
 }
 
-// `/workflows demo`: a made-up workflow whose agents "work" on the clock tick, so every control can be tried.
+// `/workflow-monitor demo`: a made-up workflow whose agents "work" on the clock tick, so every control can be tried.
 const DEMO = 'demo-'
 const DEMO_SCRIPT: LogEntry[] = [
   { kind: 'thinking', text: 'The handler validates the cart twice; the second pass can go if the first one is cached.' },
@@ -1188,8 +1188,9 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     // The typeahead's line for it, and its options drawn dim after the name (USAGE spells them out).
+    // Not /workflows: Claude Code has its own, which wins.
     await $.command.register({
-      name: 'workflows',
+      name: 'workflow-monitor',
       description: 'Live pane of workflows and subagents: model, effort, tokens, time, cost; pause, stop, transcripts',
       argumentHint: '[demo|clear|help]',
     })
@@ -1215,7 +1216,7 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'workflows' }, async ($, e) => {
+  on('command.run', { command: 'workflow-monitor' }, async ($, e) => {
     const arg = e.args.trim()
     if (arg === 'clear') {
       await removeAgents($, (await read($, agents)).filter(a => a.status !== 'running').map(a => a.id))
@@ -1238,7 +1239,7 @@ export const register: Register = on => {
       pauseRequested.add(`${DEMO}6`)
       await update($, idle, ({ wf_demo: _, [SUBAGENTS]: __, ...rest }) => rest)
       await $.ui.open({ id: PANE, title: TITLE })
-      return { text: 'Demo workflow loaded: its running agents tick every second. Try ⚙ on a running row. /workflows clear removes it.' }
+      return { text: 'Demo workflow loaded: its running agents tick every second. Try ⚙ on a running row. /workflow-monitor clear removes it.' }
     }
     // Each opening line follows the plugin's name the row starts with ("workflow-monitor: …").
     if (arg === 'help') return { text: `a live pane of your workflows and subagents.\n\n${USAGE}` }

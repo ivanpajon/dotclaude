@@ -182,11 +182,11 @@ test('tracks a workflow agent, applies overrides, and pauses, stops and inspects
   await pane.unmount()
 })
 
-test('/workflows demo loads sample agents that honour Stop', async ($, on) => {
+test('/workflow-monitor demo loads sample agents that honour Stop', async ($, on) => {
   let clock = 3_000_000
   on('clock.now', () => ({ value: (clock += 1000) }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  await $.command.run({ command: 'workflows', args: 'demo' })
+  await $.command.run({ command: 'workflow-monitor', args: 'demo' })
   const props = { title: 'Workflows', isFocused: false, bodyColumns: 110 }
   const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor', props, viewport: { columns: 110, rows: 60 } })
   expect(await pane.find({ text: 'checkout-redesign' })).toBeTruthy()
@@ -807,7 +807,7 @@ test('a group can sit on the board and under Archived at once, and starts afresh
   await pane.unmount()
 })
 
-test('/workflows clear and a fresh /workflows demo leave nothing of the old behind', async ($, on) => {
+test('/workflow-monitor clear and a fresh /workflow-monitor demo leave nothing of the old behind', async ($, on) => {
   let clock = 15_000_000
   let n = 0
   on('clock.now', () => ({ value: (clock += 100) }))
@@ -824,7 +824,7 @@ test('/workflows clear and a fresh /workflows demo leave nothing of the old behi
   await spawn(1, 'wf_c') // agent-c1, finished and archived below
   await spawn(2, 'wf_live') // agent-c2, left running
   await $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 't-c1', agentId: 'agent-c1', reason: 'answer' })
-  await $.command.run({ command: 'workflows', args: 'demo' })
+  await $.command.run({ command: 'workflow-monitor', args: 'demo' })
   const props = { title: 'Workflows', isFocused: false, bodyColumns: 110 }
   const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor', props, viewport: { columns: 110, rows: 80 } })
   const has = async (key: string) => !!(await pane.find({ key }))
@@ -835,7 +835,7 @@ test('/workflows clear and a fresh /workflows demo leave nothing of the old behi
   await pane.press({ key: 'gear-demo-4' })
   await pane.press({ key: 'stop-demo-4' })
   expect(await pane.find({ text: /stopping…/ })).toBeTruthy()
-  await $.command.run({ command: 'workflows', args: 'demo' })
+  await $.command.run({ command: 'workflow-monitor', args: 'demo' })
   expect(await pane.findAll({ key: 'fold-wf_demo' })).toHaveLength(1)
   expect(await pane.find({ text: /stopping…/ })).toBeFalsy()
   expect(await pane.find({ text: /⏸/ })).toBeTruthy()
@@ -843,7 +843,7 @@ test('/workflows clear and a fresh /workflows demo leave nothing of the old behi
   expect('deny' in call).toBe(false)
 
   // Clear takes the finished, the archived and the demo; a running agent stays.
-  await $.command.run({ command: 'workflows', args: 'clear' })
+  await $.command.run({ command: 'workflow-monitor', args: 'clear' })
   expect(await has('archived-toggle')).toBe(false)
   expect(await has('fold-wf_demo')).toBe(false)
   expect(await has('fold-wf_live')).toBe(true)
@@ -866,7 +866,7 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   on('turn.complete', () => ({ text: 'ok' }))
   on('prompt.submit', (_$, e) => ({ text: e.text }))
   // The session starts its clock: a run going quiet is noticed on it.
-  on('command.register', () => ({ value: { command: 'workflows' } }))
+  on('command.register', () => ({ value: { command: 'workflow-monitor' } }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
   const spawn = (toolUseId: string, runId: string | undefined, index: number) => $.agent.spawn({
@@ -1225,7 +1225,7 @@ test('agent rows hide no column at any width, cutting the name short, then go on
   let clock = 3_000_000
   on('clock.now', () => ({ value: (clock += 1000) }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  await $.command.run({ command: 'workflows', args: 'demo' })
+  await $.command.run({ command: 'workflow-monitor', args: 'demo' })
   const at = async (columns: number, surface: 'terminal' | 'desktop') => {
     const props = { title: 'Workflows', isFocused: false, bodyColumns: columns }
     const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface, component: 'Pane', requestId: 'workflow-monitor', props, viewport: { columns, rows: 60 } })
@@ -1289,7 +1289,7 @@ test('a workflow takes its name and phases from its launch, as the call\'s input
   await pane.unmount()
 })
 
-test('/workflows says what it does and takes: in the typeahead, with help, and on a mistyped option', async ($, on) => {
+test('/workflow-monitor says what it does and takes: in the typeahead, with help, and on a mistyped option', async ($, on) => {
   mock.clock(on, { now: 40_000_000 })
   let spec: { name: string; description: string; argumentHint?: string } | undefined
   let opened = 0
@@ -1297,18 +1297,18 @@ test('/workflows says what it does and takes: in the typeahead, with help, and o
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('ui.open', () => { opened++; return { value: { isPlaced: true } } })
   await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
-  expect(spec?.name).toBe('workflows')
+  expect(spec?.name).toBe('workflow-monitor')
   expect(spec?.description).toMatch(/workflows and subagents/)
   expect(spec?.argumentHint).toBe('[demo|clear|help]')
   // Help names every option in a markdown table, the row's way of drawing it; none opens the pane.
-  const help = await $.command.run({ command: 'workflows', args: 'help' })
+  const help = await $.command.run({ command: 'workflow-monitor', args: 'help' })
   expect(help.text).toMatch(/^a live pane of your workflows and subagents\.\n\n\| Command \| What it does \|\n\|---\|---\|\n/)
-  for (const option of ['/workflows', '/workflows demo', '/workflows clear', '/workflows help']) expect(help.text).toContain('| `' + option + '` |')
-  const typo = await $.command.run({ command: 'workflows', args: 'clera' })
+  for (const option of ['/workflow-monitor', '/workflow-monitor demo', '/workflow-monitor clear', '/workflow-monitor help']) expect(help.text).toContain('| `' + option + '` |')
+  const typo = await $.command.run({ command: 'workflow-monitor', args: 'clera' })
   expect(typo.text).toMatch(/^unknown option `clera`\. It takes these:\n\n\| Command/)
-  expect(typo.text).toContain('| `/workflows clear` |')
+  expect(typo.text).toContain('| `/workflow-monitor clear` |')
   expect(opened).toBe(0)
-  expect((await $.command.run({ command: 'workflows', args: '' })).text).toBe('Workflow monitor opened.')
+  expect((await $.command.run({ command: 'workflow-monitor', args: '' })).text).toBe('Workflow monitor opened.')
   expect(opened).toBe(1)
 })
 
