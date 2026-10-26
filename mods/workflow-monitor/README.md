@@ -4,6 +4,8 @@ A live pane in Claude Code for your running **workflows** and **subagents**. Eve
 
 It works in the terminal and in the desktop app.
 
+![The pane with a Subagents card and a checkout-redesign workflow card, its agents grouped under Investigate, Design and Review](images/overview.png)
+
 ## Install
 
 ```
@@ -90,13 +92,19 @@ On a **running agent's row**, ⚙ opens a panel under it with:
 - **Model** and **Effort** pickers, with **Done**. A pick waits in the panel until you press Done, which sets it; the agent uses it from its next request. Closing the panel any other way (its gear, another panel) drops the picks.
 - **↗ Inspect**, to open its transcript.
 
+![A running agent's settings panel open under its row: Pause, Stop, Inspect, and the Model and Effort pickers with Done](images/agent-settings.png)
+
 On a **card's header**, ⚙ opens the same for the whole group: **Pause all / Resume all**, **Stop all**, and a model and effort for every agent in it, including agents the workflow starts later. An agent's own setting wins over the card's. Once nothing in the card is running, **Archive** and **Remove** take the place of Pause all and Stop all. The model and effort pickers stay while the workflow may still start agents (between phases), and on the Subagents card, which new subagents can join at any time. Once a workflow has ended (done, failed or stopped), they are hidden: there is nothing left for them to apply to.
+
+![The Subagents card's settings panel: Pause all, Stop all, and the Model and Effort pickers with Done](images/card-settings.png)
 
 The gear shows **▴** while its panel is open. A model or effort set there with **Done** shows at once in the agents' rows, in purple (see [Agent rows](#agent-rows)).
 
 ### ↗ Inspect
 
 Opens the agent's transcript in a tab of its own, titled with its description. Each agent gets its own tab, so several transcripts can be open at once; Inspect on an agent whose tab is already open reuses that tab, and removing an agent from the monitor closes it. The transcript is laid out like Claude Code's own **View transcript** for a subagent:
+
+![A finished agent's transcript tab: its model and effort, the prompt in a filled box, its reply, a folded line of tool calls, and the totals](images/inspect.png)
 
 - **Model** and **Effort** on top. While the agent runs, **Pause** and **Stop** sit beside them; once it is over, how it ended (Completed, Stopped or Failed).
 - **The prompt** it was given, in a filled box. A prompt over 1200 characters is cut to about twelve lines, with **Show more** to read it whole. For a workflow agent this is the task its script computed. The harness's copy of your request and Claude Code's reminders are left out.
