@@ -1990,7 +1990,7 @@ export const register: Register = on => {
       <Box key="archived" flexDirection="column" paddingX={1}>
         <Box flexDirection="row" justifyContent="space-between" gap={1}>
           <Box flexShrink={1} minWidth={0}>
-            {control(button('archived-toggle', `Archived (${shelf.length})`, { plain: true, prefix: archOpen ? '▾ ' : '▸ ' }))}
+            {control(button('archived-toggle', `Archived (${shelf.length})`, { plain: true, dim: true, prefix: archOpen ? '▾ ' : '▸ ' }))}
           </Box>
           {archOpen && <Box flexShrink={0}>{control(button('purge-archived', 'Remove all', { plain: true }))}</Box>}
         </Box>
