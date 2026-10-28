@@ -323,15 +323,51 @@ async function noteLaunch($: EngineInterface, toolUseId: string, input: { script
 }
 
 // Remembers the folder Claude Code keeps the session's files in (beside its `<id>.jsonl`
-// transcript): from a hook's transcript path, or a workflow script saved under it.
+// transcript): from the transcript's path, or a workflow script saved under it.
 let knownDir: string | undefined
 async function noteSessionDir($: EngineInterface, path: string | undefined) {
   const p = path?.replace(/\\/g, '/')
-  const cut = (mark: string) => (p?.includes(mark) ? p.slice(0, p.indexOf(mark)) : undefined)
-  const dir = cut('/subagents/') ?? cut('/workflows/scripts/') ?? (p?.endsWith('.jsonl') ? p.slice(0, -6) : undefined)
+  const dir = p?.includes('/workflows/scripts/') ? p.slice(0, p.indexOf('/workflows/scripts/')) : p?.endsWith('.jsonl') ? p.slice(0, -6) : undefined
   if (!dir || dir === knownDir) return
   knownDir = dir
   if ((await read($, sessionDir)) !== dir) await update($, sessionDir, () => dir)
+}
+
+// The session's folder, looked up by the session's id while no Workflow launch named it (or named
+// another session's, before a /clear): its `<id>.jsonl` transcript is in a folder under the config
+// folder's `projects`. Not from a classic hook's transcript_path: a managed hook above the monitor
+// may answer classic.PostToolUse itself. A lookup that finds nothing is tried again 10s later.
+let lookedUp: { id: string; at: number } | undefined
+async function sessionFolder($: EngineInterface): Promise<string | null> {
+  const known = await read($, sessionDir)
+  try {
+    const id = await $.session.id()
+    const t = await $.clock.now()
+    if (known?.endsWith(`/${id}`) || (lookedUp?.id === id && t - lookedUp.at < 10_000)) return known
+    lookedUp = { id, at: t }
+    // The home folder as Claude Code reads it: USERPROFILE on Windows, HOME elsewhere.
+    const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
+    const config = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? (home ? `${home}/.claude` : undefined)
+    if (!config) return known
+    const projects = `${config.replace(/\\/g, '/')}/projects`
+    const has = (folder: string) => $.fs.exists(`${folder}/${id}.jsonl`).catch(() => false)
+    // The project's folder is named after the one the session started in: tried first.
+    let folder: string | undefined = `${projects}/${(await $.session.root()).replace(/[^a-zA-Z0-9]/g, '-')}`
+    if (!(await has(folder))) {
+      folder = undefined
+      for (const x of await $.fs.list(projects).catch(() => [])) {
+        if (x.kind === 'dir' && (await has(`${projects}/${x.name}`))) {
+          folder = `${projects}/${x.name}`
+          break
+        }
+      }
+    }
+    if (!folder) return known
+    await noteSessionDir($, `${folder}/${id}.jsonl`)
+    return `${folder}/${id}`
+  } catch {
+    return known
+  }
 }
 
 // Lists a started agent: its row (with `change` made to the others in the same write), its card
@@ -360,7 +396,7 @@ const removed = new Set<string>()
 type Found = { runId?: string; label: string; type: string; effort?: string; toolUseId?: string; startedAt: number; retryOf?: string; index?: number; phase?: string }
 
 async function adopt($: EngineInterface, id: string, model: string): Promise<AgentRow | undefined> {
-  if (removed.has(id) || !(await read($, sessionDir))) return undefined
+  if (removed.has(id) || !(await sessionFolder($))) return undefined
   const pending = adopting.get(id)
   if (pending) return pending
   const t = await $.clock.now()
@@ -1295,14 +1331,6 @@ export const register: Register = on => {
     }
   })
 
-  // The session's folder, where agents the monitor didn't see start are looked up (see adopt):
-  // every tool call's classic hook names it, in any agent.
-  on('classic.PostToolUse', async ($, e, next) => {
-    await noteSessionDir($, e.transcript_path).catch(() => {})
-
-    return next(e)
-  })
-
   on('agent.spawn', async ($, e, next) => {
     const started = await next(e)
     if ('deny' in started || !started.agentId) return started
@@ -1325,6 +1353,8 @@ export const register: Register = on => {
     // A model or effort set on its card shows from the start.
     const row = present(fresh, {}, (await read($, groupOverrides))[groupKey(fresh)])
     await listAgent($, row)
+    // Its transcript and phase are read from the session's folder.
+    await sessionFolder($)
     await notePhase($, row).catch(() => {})
 
     return started

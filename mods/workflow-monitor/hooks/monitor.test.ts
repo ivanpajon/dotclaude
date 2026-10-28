@@ -1523,6 +1523,40 @@ test('agents it didn\'t see start join their cards: a stalled agent\'s retry, an
   await pane.unmount()
 })
 
+test('with no Workflow launch naming the session\'s folder, it finds it by the session\'s id', async ($, on) => {
+  mock.clock(on, { now: 50_000_000 })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('turn.step', async function* (_$, e) {
+    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: USAGE }
+  })
+  // The transcript is under a project folder not named after where the session runs now: found by
+  // looking through them all.
+  const projects = 'C:/u/.claude/projects'
+  const files: Record<string, string> = {
+    [`${projects}/other/other-sess.jsonl`]: '',
+    [`${projects}/repo/sess.jsonl`]: '',
+    [`${projects}/repo/sess/subagents/agent-agent-p1.meta.json`]: JSON.stringify({ agentType: 'Explore', description: 'Map the checkout module' }),
+  }
+  const norm = (path: string) => path.replace(/\\/g, '/')
+  on('session.id', () => ({ value: 'sess' }))
+  on('session.root', () => ({ value: 'C:\\elsewhere' }))
+  on('env.get', (_$, e) => ({ value: e.name === 'CLAUDE_CONFIG_DIR' ? 'C:\\u\\.claude' : undefined }))
+  on('fs.read', (_$, e) => ({ value: files[norm(e.path)] ?? '' }))
+  on('fs.exists', (_$, e) => ({ value: norm(e.path) in files }))
+  on('fs.stat', () => ({ value: { kind: 'file' as const, size: 1, mtimeMs: 50_000_000, isLink: false } }))
+  on('fs.list', (_$, e) => {
+    const at = `${norm(e.path)}/`
+    const names = new Set(Object.keys(files).filter(p => p.startsWith(at)).map(p => p.slice(at.length).split('/')[0] ?? ''))
+    return { value: [...names].map(name => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })) }
+  })
+
+  // A subagent already running when the monitor loaded joins at its next request.
+  for await (const _ of $.turn.step({ turnId: 't-p1', index: 0, model: 'claude-opus-5-5', effort: 'high', messageCount: 1, agentId: 'agent-p1' })) { /* read on */ }
+  const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor', props: { title: 'Workflows', isFocused: false, bodyColumns: 110 }, viewport: { columns: 110, rows: 40 } })
+  expect(await pane.find({ text: /Map the checkout module/ })).toBeTruthy()
+  await pane.unmount()
+})
+
 test('Inspect reads an agent\'s own transcript, as Claude Code\'s own view draws it; its phase is the one it ran in', async ($, on) => {
   const clock = mock.clock(on, { now: 60_000_000 })
   let n = 0

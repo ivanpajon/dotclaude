@@ -146,8 +146,9 @@ declare module 'claude-code' {
        */
       unfolded: Record<string, boolean>
       /**
-       * The folder Claude Code keeps this session's transcript and subagent files in, once a hook
-       * named it: where an agent the monitor didn't see start is looked up.
+       * The folder Claude Code keeps this session's transcript and subagent files in, once a
+       * Workflow launch named it or the session's id found it: where an agent the monitor didn't
+       * see start is looked up.
        */
       sessionDir: string | null
     }
