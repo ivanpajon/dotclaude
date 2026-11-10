@@ -74,8 +74,10 @@ const finishedOpen = atom({ plugin: 'workflow-monitor', key: 'finishedOpen' } as
 const sessionDir = atom({ plugin: 'workflow-monitor', key: 'sessionDir' } as const, null as string | null)
 
 // USD per million tokens: [input, output, cache write (5 min), cache read].
-// Anthropic first-party list prices, 2026-10. Longer keys first: matched by substring.
+// Anthropic first-party list prices, 2026-11. Longer keys first: matched by substring.
 const PRICES: [string, [number, number, number, number]][] = [
+  ['fable-5-2', [8, 40, 10, 0.2]],
+  ['mythos-5-2', [8, 40, 10, 0.2]],
   ['fable-5-1', [10, 50, 12.5, 0.25]],
   ['mythos-5-1', [10, 50, 12.5, 0.25]],
   ['fable-5', [10, 50, 12.5, 1]],
@@ -91,7 +93,7 @@ const PRICES: [string, [number, number, number, number]][] = [
 // What the editors offer. `inherit` keeps whatever the agent would have used.
 const MODEL_OPTIONS = [
   { value: 'inherit', label: 'Inherit' },
-  { value: 'claude-fable-5-1', label: 'Fable 5.1' },
+  { value: 'claude-fable-5-2', label: 'Fable 5.2' },
   { value: 'claude-opus-5-5', label: 'Opus 5.5' },
   { value: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
   { value: 'claude-haiku-5-5', label: 'Haiku 5.5' },
