@@ -7,7 +7,7 @@
       "name": "workflow-budget",
       "source": "./skills/workflow-budget",
       "description": "Caps multi-agent workflow size (40 agents by default), asks before going bigger, and uses cheaper verification patterns.",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "category": "productivity",
       "tags": ["skill", "workflows", "subagents", "ultracode", "cost"]
     },

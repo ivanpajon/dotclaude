@@ -72,6 +72,15 @@ Keep the quality ideas, and spend fewer agents on them:
   
   If the user names an effort for subagents, use that instead.
 
+- **On Fable, one notch lower.** Keep the session's model: if the user runs Fable, that is their choice. Lower the effort instead, since Fable at a lower effort still matches earlier models at a higher one:
+  
+  - `'medium'` for finders, workers and verifiers.
+  - `'low'` for simple stages.
+  - `'high'` only for a few hard stages, such as a final judge or synthesis. Say why in a code comment.
+  - No `'xhigh'` unless the user asks.
+  
+  On Fable, effort barely changes how long replies are; it mostly cuts thinking. So also cap the output in the prompt: ask for a `schema` with short fields, or a set length.
+
 - **Write explicit, detailed agent prompts.** Each prompt should state the goal, the exact files or scope, what to return (use a `schema` where possible) and when to stop. Agents that don't have to rediscover context finish faster and use fewer tokens.
 
 ## Ultracode itself
