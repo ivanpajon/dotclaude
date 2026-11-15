@@ -929,23 +929,25 @@ async function removeAgents($: EngineInterface, ids: string[]) {
 const foldedNow = new Map<string, boolean>()
 const foldGroup = (k: string) => (k.includes('::') ? k.slice(0, k.indexOf('::')) : k)
 
-// The surface regions (`Client`s: the ticking times, a phase header's click) that failed, by
-// key: how many times, and when lately (see the `ui.fault` hook). A desktop runs a mod's regions
-// in one frame and tears it down whole when one of them is slow to draw, each region then
-// showing the fault in its place; it mounts a failed region again only a few times in its life.
-// So each failure draws the region anew under a fresh key, and one that keeps failing (FAULT_MAX
-// times in FAULT_MS) is drawn plain instead until it settles.
+// When the surface regions (`Client`s: the ticking times, a phase header's click) failed (see
+// the `ui.fault` hook). A desktop runs a mod's regions in one frame and tears it down whole when
+// one of them is slow to draw, every region then showing that one's fault in its place (another
+// region's fault in a ticking time: "an instance of press.tsx did not answer"), and keeps a
+// failed instance under its key. So a failure is the whole frame's: every region is drawn anew
+// under a fresh key (the generation), and once the frame keeps failing (FAULT_MAX times in
+// FAULT_MS) they're all drawn plain instead until it settles.
 const FAULT_MAX = 3
 const FAULT_MS = 10 * 60_000
-const faults = new Map<string, { n: number; at: number[] }>()
-// A key as drawn after a failure (`<key>~<n>`), to the region's own.
-const redrawnAs = new Map<string, string>()
+let faultedAt: number[] = []
+let generation = 0
+// The generation each key was drawn in after a failure (`<key>~<n>`); one not here was drawn
+// before the latest failure.
+const drawnIn = new Map<string, number>()
 const clientKey = (key: string, now: number): string | undefined => {
-  const f = faults.get(key)
-  if (!f) return key
-  if (f.at.filter(t => now - t < FAULT_MS).length >= FAULT_MAX) return undefined
-  const k = `${key}~${f.n}`
-  redrawnAs.set(k, key)
+  if (faultedAt.filter(t => now - t < FAULT_MS).length >= FAULT_MAX) return undefined
+  if (!generation) return key
+  const k = `${key}~${generation}`
+  drawnIn.set(k, generation)
   return k
 }
 
@@ -1202,14 +1204,17 @@ export const register: Register = on => {
     if (typeof k === 'string' && k.includes('::') && foldedNow.has(k)) await perform($, `fold-${k}`)
     return {}
   })
-  // A region that failed on a surface: noted, so the redraw the engine makes next draws it anew
-  // (see clientKey).
+  // A region that failed on a surface: the frame it ran in failed, so every region is drawn anew
+  // (see clientKey). The other regions torn down with it report the same failure: one drawn before
+  // the latest failure is that one's, already handled. The redraw is asked for, as the engine draws
+  // nothing again for a region that fails in a redraw a failure caused.
   on('ui.fault', async ($, e, next) => {
-    if (e.requestId === PANE || isInspect(e.requestId)) {
-      const key = redrawnAs.get(e.element) ?? e.element
+    if ((e.requestId === PANE || isInspect(e.requestId)) && (drawnIn.get(e.element) ?? 0) === generation) {
       const now = await $.clock.now()
-      const f = faults.get(key)
-      faults.set(key, { n: (f?.n ?? 0) + 1, at: [now, ...(f?.at ?? []).filter(t => now - t < FAULT_MS)] })
+      faultedAt = [now, ...faultedAt.filter(t => now - t < FAULT_MS)]
+      generation++
+      drawnIn.clear()
+      $.ui.invalidate('ui.render')
     }
     return next(e)
   })
