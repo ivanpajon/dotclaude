@@ -16,6 +16,16 @@ const NAP = async () => {
 // A background task's end, as its notification reaches the session.
 const ended = (toolUseId: string, status: string) =>
   `<task-notification>\n<task-id>bg_${toolUseId}</task-id>\n<tool-use-id>${toolUseId}</tool-use-id>\n<status>${status}</status>\n<summary>Workflow ${status}</summary>\n</task-notification>`
+// A time as the desktop draws it, plain text (a Text takes no key): the first figure under a found
+// element, such as an agent's row or a card.
+const shownText = (n: unknown): string => (typeof n === 'string' ? n
+  : ((n as { children?: unknown[] })?.children ?? []).map(shownText).join(''))
+const figure = (n: unknown): string | undefined => {
+  if (!n || typeof n !== 'object') return undefined
+  const node = n as { type?: string; children?: unknown[] }
+  return node.type === 'Text' && /^(\d+h )?(\d+m )?\d+s$/.test(shownText(node)) ? shownText(node)
+    : (node.children ?? []).map(figure).find(Boolean)
+}
 
 test('tracks a workflow agent, applies overrides, and pauses, stops and inspects it', async ($, on) => {
   let n = 0
@@ -218,37 +228,59 @@ test('/workflow-monitor demo loads sample agents that honour Stop', async ($, on
   await pane.unmount()
 })
 
-test('an elapsed time counts up on the surface without the pane redrawing', async ($, on) => {
-  let clock = 5_000_000
-  on('clock.now', () => ({ value: clock }))
+test('an elapsed time counts up: by itself on the terminal, on the hooks\' clock on the desktop', async ($, on) => {
+  const clock = mock.clock(on, { now: 5_000_000 })
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: 'agent-t' }))
+  on('command.register', () => ({ value: { command: 'workflow-monitor' } }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
   await $.agent.spawn({
     tool_use_id: 'toolu_t', prompt: 'p', description: 'Timed agent', subagentType: 'Explore',
     provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: false, fork: false,
   })
+  const props = { title: 'Workflows', isFocused: false, bodyColumns: 110 }
+  const mount = (surface: typeof SURFACES[number]) =>
+    $.ui.mount({ plugin: 'workflow-monitor', surface, component: 'Pane', requestId: 'workflow-monitor', props, viewport: { columns: 110, rows: 40 } })
   for (const surface of SURFACES) {
-    clock = 5_004_000
-    const props = { title: 'Workflows', isFocused: false, bodyColumns: 110 }
-    const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface, component: 'Pane', requestId: 'workflow-monitor', props, viewport: { columns: 110, rows: 40 } })
-    expect(await pane.find({ text: '4s', in: 'time-agent-t' })).toBeTruthy()
-    await pane.advance(3000)
-    expect(await pane.find({ text: '7s', in: 'time-agent-t' })).toBeTruthy()
-    // A click redraws the pane; the time keeps counting from the redraw's figure.
-    clock += 3000
-    await pane.press({ key: 'gear-agent-t' })
-    expect(await pane.find({ text: '7s', in: 'time-agent-t' })).toBeTruthy()
-    await pane.advance(2000)
-    expect(await pane.find({ text: '9s', in: 'time-agent-t' })).toBeTruthy()
-    await pane.unmount()
+    if (surface === 'terminal') {
+      // On the terminal it counts on the surface, in a Client, without the pane redrawing.
+      await clock.set(5_004_000)
+      const pane = await mount(surface)
+      expect(await pane.find({ text: '4s', in: 'time-agent-t' })).toBeTruthy()
+      await pane.advance(3000)
+      expect(await pane.find({ text: '7s', in: 'time-agent-t' })).toBeTruthy()
+      // A click redraws the pane; the time keeps counting from the redraw's figure.
+      await clock.advance(3000)
+      await pane.press({ key: 'gear-agent-t' })
+      expect(await pane.find({ text: '7s', in: 'time-agent-t' })).toBeTruthy()
+      await pane.advance(2000)
+      expect(await pane.find({ text: '9s', in: 'time-agent-t' })).toBeTruthy()
+      await pane.unmount()
+    } else {
+      // On the desktop it is plain text (a background pane's regions stop answering), moved by the
+      // hooks' clock, which the session starts: each second it redraws the pane while a time counts.
+      await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
+      const pane = await mount(surface)
+      expect(await pane.find({ key: 'time-agent-t' })).toBeFalsy()
+      expect(figure(await pane.find({ key: 'agent-t' }))).toBe('7s')
+      // The surface's own frame clock moves nothing; the hooks' does.
+      await pane.advance(3000)
+      expect(figure(await pane.find({ key: 'agent-t' }))).toBe('7s')
+      await clock.advance(3000)
+      expect(figure(await pane.find({ key: 'agent-t' }))).toBe('10s')
+      await clock.advance(2000)
+      expect(figure(await pane.find({ key: 'agent-t' }))).toBe('12s')
+      await pane.unmount()
+    }
   }
 })
 
 test('paused and stopped agents stop counting, and a workflow with none working stops too', async ($, on) => {
-  let clock = 7_000_000
+  const clock = mock.clock(on, { now: 7_000_000 })
   let n = 0
-  on('clock.now', () => ({ value: clock }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('command.register', () => ({ value: { command: 'workflow-monitor' } }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('tool.call', () => ({ result: 'launched' }))
   on('agent.spawn', () => ({ model: 'claude-opus-5-5', agentId: `agent-p${++n}` }))
   await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_p', input: { script: SCRIPT } })
@@ -260,15 +292,21 @@ test('paused and stopped agents stop counting, and a workflow with none working 
     })
   }
   const props = { title: 'Workflows', isFocused: false, bodyColumns: 110 }
-  clock += 10_000
+  // The session starts the hooks' clock, which moves the desktop's times (plain text).
+  await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true })
+  await clock.advance(10_000)
   const pane = await $.ui.mount({ plugin: 'workflow-monitor', surface: 'desktop', component: 'Pane', requestId: 'workflow-monitor', props, viewport: { columns: 110, rows: 40 } })
-  // A time that counts does so on the surface, in a Client; one that stands still is plain text.
-  const counts = async (key: string, text: string) => expect(await pane.find({ text, in: key })).toBeTruthy()
+  // A time is plain text on the desktop, in an agent's row or (the workflow's) its card's header.
+  // One that counts has moved on the hooks' clock alone (see wait); one that stands still keeps its
+  // figure, even drawn again.
+  const at = async (key: string) => figure(await pane.find({ key: key.replace(/^time-/, '').replace(/^span-/, 'card-') }))
+  const counts = async (key: string, text: string) => expect(await at(key)).toBe(text)
   const stands = async (key: string, text: string) => {
-    expect(await pane.find({ key })).toBeFalsy()
-    expect(await pane.find({ type: 'Text', text })).toBeTruthy()
+    expect(await at(key)).toBe(text)
+    await pane.redraw()
+    expect(await at(key)).toBe(text)
   }
-  const wait = async (ms: number) => { await pane.advance(ms); clock += ms }
+  const wait = (ms: number) => clock.advance(ms)
   await counts('time-agent-p1', '10s')
   await counts('span-wf_p', '10s')
 
@@ -851,7 +889,9 @@ test('/workflow-monitor clear and a fresh /workflow-monitor demo leave nothing o
   await pane.unmount()
 })
 
-test('a card\'s status chip says where its group stands, at any width', async ($, on) => {
+// Longer than the default: through its ten quiet minutes the hooks' clock redraws the desktop pane
+// each second, an idle run's time counting there.
+test('a card\'s status chip says where its group stands, at any width', { timeoutMs: 15_000 }, async ($, on) => {
   const clock = mock.clock(on, { now: 20_000_000 })
   on('process.run', NAP)
   let n = 0
@@ -1076,15 +1116,20 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   // None runs and the run hasn't said it ended: idle (it may be between phases), its quiet time counting.
   await end('agent-c1', 'aborted')
   await end('agent-c5', 'aborted')
-  expect(await chipOf(pane, 'wf_c')).toBe('○ · ✗ 1 · ⏹ 3 · ✓ 1')
+  // On the desktop that time is plain text in the chip, moved by the hooks' clock; on the terminal
+  // a Client that counts by itself (no text of the chip's own).
+  expect(await chipOf(pane, 'wf_c')).toBe('○ 0s · ✗ 1 · ⏹ 3 · ✓ 1')
   expect(await atWidths('wf_c')).toEqual(['○ ✗1 ⏹3 ✓1', '○ ✗1 ⏹3 ✓1'])
-  expect((await pane.find({ key: 'status-wf_c' }))?.children[1]).toMatchObject({ type: 'Client' })
-  expect(await pane.find({ text: '0s', in: 'idle-wf_c' })).toBeTruthy()
-  await pane.advance(65_000)
-  expect(await pane.find({ text: '1m 05s', in: 'idle-wf_c' })).toBeTruthy()
+  expect((await pane.find({ key: 'status-wf_c' }))?.children[1]).toMatchObject({ type: 'Text' })
+  await clock.advance(65_000)
+  expect(await chipOf(pane, 'wf_c')).toBe('○ 1m 05s · ✗ 1 · ⏹ 3 · ✓ 1')
   // Past an hour it gives the seconds too, as Claude Code's own panel does.
-  await pane.advance(3_600_000)
-  expect(await pane.find({ text: '1h 01m 05s', in: 'idle-wf_c' })).toBeTruthy()
+  const idleTerm = await mount(110, 'terminal')
+  expect((await idleTerm.find({ key: 'status-wf_c' }))?.children[1]).toMatchObject({ type: 'Client' })
+  expect(await idleTerm.find({ text: '1m 05s', in: 'idle-wf_c' })).toBeTruthy()
+  await idleTerm.advance(3_600_000)
+  expect(await idleTerm.find({ text: '1h 01m 05s', in: 'idle-wf_c' })).toBeTruthy()
+  await idleTerm.unmount()
   expect(await frame('wf_c')).toEqual({ fill: '#80808014', desktopBorder: 'round #00000000', border: undefined, dim: true })
   // Between phases it may start more agents: its settings, still open from Stop all, can set a model for them.
   await pane.select({ key: 'model-group-wf_c', value: 'claude-haiku-5-5' })
@@ -1108,7 +1153,7 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   // the new call's end counts though its agents carry no call.
   launches.toolu_c2 = { status: 'async_launched', taskId: 'bg_c2', runId: 'wf_c', workflowName: 'store-switch-design' }
   await $.tool.call({ tool: 'Workflow', tool_use_id: 'toolu_c2', input: {} })
-  expect(await chipOf(pane, 'wf_c')).toBe('○ · ✗ 1 · ⏹ 3 · ✓ 1')
+  expect(await chipOf(pane, 'wf_c')).toBe('○ 1m 05s · ✗ 1 · ⏹ 3 · ✓ 1')
   // Going again, the model it kept applies again, and shows, and so does the phase still to come.
   await pane.press({ key: 'gear-group-wf_c' })
   expect((await pane.find({ key: 'model-group-wf_c' }))?.props.value).toBe('claude-haiku-5-5')
@@ -1142,9 +1187,9 @@ test('a card\'s status chip says where its group stands, at any width', async ($
     await spawn(`toolu_${run}`, run, 1)
     await end(id, reason)
   }
-  expect(await chipOf(pane, 'wf_f')).toBe('○ · ✓ 1')
-  expect(await chipOf(pane, 'wf_g')).toBe('○ · ✗ 1')
-  expect(await chipOf(pane, 'wf_h')).toBe('○ · ⏹ 1')
+  expect(await chipOf(pane, 'wf_f')).toBe('○ 2s · ✓ 1')
+  expect(await chipOf(pane, 'wf_g')).toBe('○ 1s · ✗ 1')
+  expect(await chipOf(pane, 'wf_h')).toBe('○ 0s · ⏹ 1')
   await clock.advance(10 * 60_000)
   expect(await chipOf(pane, 'wf_f')).toBe('✓ done')
   expect(await chipOf(pane, 'wf_g')).toBe('✗ 1 failed')
@@ -1176,7 +1221,7 @@ test('a card\'s status chip says where its group stands, at any width', async ($
   expect(await onBoard('wf_h')).toBe(false)
   await pane.press({ key: 'finished-toggle' })
   await end('agent-c13', 'answer')
-  expect(await chipOf(pane, 'wf_f')).toBe('○ · ✓ 2')
+  expect(await chipOf(pane, 'wf_f')).toBe('○ 0s · ✓ 2')
   expect(await isOpen('wf_f')).toBe(true)
   expect(await isOpen('wf_h')).toBe(false)
   expect(await isOpen('wf_d')).toBe(false)
@@ -1645,8 +1690,8 @@ phase('Extract')`
   const region = around(await pane.drawn(), 'hit-wf_t::Extract')
   expect(region?.props).toMatchObject({ position: 'absolute', display: 'none' })
   expect(region?.hover ?? region?.props?.hover).toMatchObject({ display: 'flex' })
-  // Its time counts on the surface while it works.
-  expect(await pane.find({ key: 'time-agent-t1' })).toBeTruthy()
+  // Its time, plain text on the desktop (the hooks' clock moves it while it works).
+  expect(figure(await pane.find({ key: 'agent-t1' }))).toBe('0s')
 
   // Its transcript file: the harness's relay of the person's request and a reminder, which aren't
   // its prompt; the computed task, which is (indented by the harness); then its work.

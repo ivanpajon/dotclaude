@@ -943,6 +943,8 @@ let generation = 0
 // The generation each key was drawn in after a failure (`<key>~<n>`); one not here was drawn
 // before the latest failure.
 const drawnIn = new Map<string, number>()
+// Whether the latest desktop drawings showed a counting time (see the clock at session.start).
+let desktopTimes = false
 // Whether regions are drawn plain now: times then move only when the pane redraws (see session.start).
 const drawnPlain = (now: number) => faultedAt.filter(t => now - t < FAULT_MS).length >= FAULT_MAX
 const clientKey = (key: string, now: number): string | undefined => {
@@ -1253,8 +1255,11 @@ export const register: Register = on => {
         const t = await $.clock.now()
         await noteQuiet($, t)
         const list = await read($, agents)
-        // With regions drawn plain (see clientKey), nothing counts on the surface: redraw the times.
-        if (drawnPlain(t) && list.some(a => a.status === 'running')) $.ui.invalidate('ui.render')
+        // Times drawn as plain text (on the desktop, or with regions drawn plain, see clientKey)
+        // move only when the pane redraws: redraw them while one counts. A desktop drawing says so
+        // itself: an idle run's quiet time counts with no agent running.
+        if (desktopTimes || (drawnPlain(t) && list.some(a => a.status === 'running'))) $.ui.invalidate('ui.render')
+        desktopTimes = false
         if (!list.some(a => a.id.startsWith(DEMO) && a.status === 'running')) return
         await demoTick($, t)
       })()
@@ -1584,8 +1589,11 @@ export const register: Register = on => {
     // An elapsed time: while it counts, it counts up by itself where the surface runs `Client`
     // regions, so no redraw is needed; one that stands still is plain text. (Regions can fail on a
     // surface, see clientKey: the fewer, the less of that.)
+    // On the desktop a counting time is plain text the hooks redraw each second (see session.start):
+    // its regions stop answering while the pane is in the background, and each then shows a fault.
     const timer = (key: string, ms: number, rate: number, dim = false) => {
-      const k = Client && rate > 0 ? clientKey(key, now) : undefined
+      if (e.surface === 'desktop' && rate > 0) desktopTimes = true
+      const k = Client && rate > 0 && e.surface !== 'desktop' ? clientKey(key, now) : undefined
       return Client && k
         ? <Client key={k} module="./ticker.tsx" props={{ base: ms, rate, ...(dim ? { dim } : {}) }} />
         : <Text dimColor={dim}>{duration(ms)}</Text>
@@ -2177,7 +2185,9 @@ export const register: Register = on => {
     const hex = ctl === 'pause' ? PAUSED : ctl === 'stop' ? STOPPED : RUNNING
     const now = await $.clock.now()
     const worked = (r.pausedSince ?? r.endedAt ?? now) - r.startedAt - (r.pausedTotal ?? 0)
-    const footerKey = Client && isWorking(r, ctls) ? clientKey(`footer-time-${id}`, now) : undefined
+    // On the desktop, plain text redrawn each second, as the pane's times (see timer there).
+    if (e.surface === 'desktop' && isWorking(r, ctls)) desktopTimes = true
+    const footerKey = Client && isWorking(r, ctls) && e.surface !== 'desktop' ? clientKey(`footer-time-${id}`, now) : undefined
     const total = totalTokens(r.usage)
     const totals = `${t.calls === 1 ? '1 tool call' : `${t.calls} tool calls`} · ${total === 1 ? '1 token' : `${tokens(total)} tokens`} · `
     const footer = (
