@@ -101,6 +101,16 @@ Keep the quality ideas, and spend fewer agents on them:
 
 - **Write explicit, detailed agent prompts.** Each prompt should state the goal, the exact files or scope, what to return (use a `schema` where possible) and when to stop. Agents that don't have to rediscover context finish faster and use fewer tokens.
 
+- **The lower the model, the more explicit the prompt.** A cheaper model does well what it is told exactly and badly what it has to infer, so a stage handed down to one gets everything you already worked out:
+  
+  - the decisions already made and why, so it doesn't reopen them;
+  - the exact paths, commands and their flags, and the steps in order;
+  - what is out of scope and must not be touched;
+  - what done looks like, as a check it can run, and what to do when the check fails (retry once, then report);
+  - the output's exact shape: a `schema`, or a short example of a good answer.
+  
+  If a stage can't be specified this way, it isn't a mechanical stage: run it on a higher model instead.
+
 ## Ultracode itself
 
 Ultracode still means: aim for the most correct answer, and orchestrate when it helps. Under this skill it no longer means "token cost is not a constraint". Choose the strongest design that fits in 30 agents. Trivial or conversational tasks still get no workflow at all, and a question that only mentions ultracode is not a request to run one.
