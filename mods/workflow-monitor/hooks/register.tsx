@@ -943,8 +943,10 @@ let generation = 0
 // The generation each key was drawn in after a failure (`<key>~<n>`); one not here was drawn
 // before the latest failure.
 const drawnIn = new Map<string, number>()
+// Whether regions are drawn plain now: times then move only when the pane redraws (see session.start).
+const drawnPlain = (now: number) => faultedAt.filter(t => now - t < FAULT_MS).length >= FAULT_MAX
 const clientKey = (key: string, now: number): string | undefined => {
-  if (faultedAt.filter(t => now - t < FAULT_MS).length >= FAULT_MAX) return undefined
+  if (drawnPlain(now)) return undefined
   if (!generation) return key
   const k = `${key}~${generation}`
   drawnIn.set(k, generation)
@@ -1251,6 +1253,8 @@ export const register: Register = on => {
         const t = await $.clock.now()
         await noteQuiet($, t)
         const list = await read($, agents)
+        // With regions drawn plain (see clientKey), nothing counts on the surface: redraw the times.
+        if (drawnPlain(t) && list.some(a => a.status === 'running')) $.ui.invalidate('ui.render')
         if (!list.some(a => a.id.startsWith(DEMO) && a.status === 'running')) return
         await demoTick($, t)
       })()
@@ -1895,8 +1899,8 @@ export const register: Register = on => {
             <Box key={`head-${key}-${p}`} flexDirection="column" {...head}>
               <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
                 <Box flexShrink={1} minWidth={0}>
-                  {started && !pressable
-                    ? control(button(`phase-${pk}`, p, { plain: true, bold: !gui }))
+                  {started && !pressable && !gui
+                    ? control(button(`phase-${pk}`, p, { plain: true, bold: true }))
                     : <Text wrap="truncate-end" {...(started ? {} : faint)}>{p}</Text>}
                 </Box>
                 {/* Elsewhere the count and the chevron are plain buttons alike, drawn the same way, so
